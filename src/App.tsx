@@ -153,7 +153,7 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.6.15";
+const APP_VERSION = "v26.6.16";
 const SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
 const AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
 

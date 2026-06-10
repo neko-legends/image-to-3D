@@ -853,6 +853,21 @@ def find_existing_output(*paths: Path) -> list[str]:
     return output
 
 
+def cleanup_job_scratch(jobs_dir: Path, keep: Path | None = None) -> None:
+    if not jobs_dir.is_dir():
+        return
+    keep_resolved = keep.resolve() if keep else None
+    for entry in jobs_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            if keep_resolved and entry.resolve() == keep_resolved:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+        except Exception:
+            continue
+
+
 def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     source_dir = paths["source_dir"]
     launch_cwd = Path.cwd()
@@ -879,6 +894,7 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     if not requested_output.is_absolute():
         requested_output = (launch_cwd / requested_output).resolve()
     requested_output.mkdir(parents=True, exist_ok=True)
+    cleanup_job_scratch(paths["jobs_dir"])
     run_dir = paths["jobs_dir"] / job.get("job_id", f"job-{int(time.time())}")
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -886,101 +902,104 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     total = len(input_paths)
     failed_count = 0
 
-    shape_pipeline = None
-    if mode != "textureOnly":
-        emit("model", "Loading Hunyuan3D shape model on CUDA")
-        shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(MODEL_REPO)
-        if as_bool(options.get("forceOffload"), False) and hasattr(shape_pipeline, "enable_model_cpu_offload"):
-            shape_pipeline.enable_model_cpu_offload()
+    try:
+        shape_pipeline = None
+        if mode != "textureOnly":
+            emit("model", "Loading Hunyuan3D shape model on CUDA")
+            shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(MODEL_REPO)
+            if as_bool(options.get("forceOffload"), False) and hasattr(shape_pipeline, "enable_model_cpu_offload"):
+                shape_pipeline.enable_model_cpu_offload()
 
-    paint_pipeline = None
-    if mode != "meshOnly":
-        emit("model", "Loading Hunyuan3D PBR texture model on CUDA")
-        max_num_view = texture_view_count(options)
-        resolution = as_int(options.get("textureViewSize"), 512, 256, 2048)
-        config = Hunyuan3DPaintConfig(max_num_view, resolution)
-        config.realesrgan_ckpt_path = str(source_dir / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth")
-        config.multiview_cfg_path = str(source_dir / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml")
-        config.custom_pipeline = str(source_dir / "hy3dpaint" / "hunyuanpaintpbr")
-        if hasattr(config, "texture_size"):
-            config.texture_size = as_int(options.get("textureSize"), getattr(config, "texture_size"), 512, 8192)
-        paint_pipeline = Hunyuan3DPaintPipeline(config)
+        paint_pipeline = None
+        if mode != "meshOnly":
+            emit("model", "Loading Hunyuan3D PBR texture model on CUDA")
+            max_num_view = texture_view_count(options)
+            resolution = as_int(options.get("textureViewSize"), 512, 256, 2048)
+            config = Hunyuan3DPaintConfig(max_num_view, resolution)
+            config.realesrgan_ckpt_path = str(source_dir / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth")
+            config.multiview_cfg_path = str(source_dir / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml")
+            config.custom_pipeline = str(source_dir / "hy3dpaint" / "hunyuanpaintpbr")
+            if hasattr(config, "texture_size"):
+                config.texture_size = as_int(options.get("textureSize"), getattr(config, "texture_size"), 512, 8192)
+            paint_pipeline = Hunyuan3DPaintPipeline(config)
 
-    for index, image_path in enumerate(input_paths):
-        emit("image_start", f"Processing {image_path.name}", path=str(image_path))
-        try:
-            if not image_path.is_file():
-                raise RuntimeError(f"Input image was not found: {image_path}")
+        for index, image_path in enumerate(input_paths):
+            emit("image_start", f"Processing {image_path.name}", path=str(image_path))
+            try:
+                if not image_path.is_file():
+                    raise RuntimeError(f"Input image was not found: {image_path}")
 
-            base = output_base_name(options, image_path, index, total)
-            final_mesh_path = unique_target(requested_output / f"{base}.glb", overwrite)
-            intermediate_mesh = run_dir / f"{base}_mesh.glb"
-            outputs: list[str] = []
+                base = output_base_name(options, image_path, index, total)
+                final_mesh_path = unique_target(requested_output / f"{base}.glb", overwrite)
+                intermediate_mesh = run_dir / f"{base}_mesh.glb"
+                outputs: list[str] = []
 
-            if mode != "textureOnly":
-                assert shape_pipeline is not None
-                image = load_condition_image(image_path)
-                seed = seed_value(options, "meshSeed", "meshSeedMode")
-                generator = torch.Generator(device="cuda").manual_seed(seed % (2**32))
-                emit("stage_start", f"Generating mesh for {image_path.name}", path=str(image_path))
-                meshes = shape_pipeline(
-                    image=image,
-                    num_inference_steps=as_int(options.get("meshSteps"), 50, 1, 200),
-                    guidance_scale=as_float(options.get("meshGuidance"), 5.0, 0, 30),
-                    generator=generator,
-                    box_v=as_float(options.get("boxV"), 1.01, 0.1, 5),
-                    octree_resolution=as_int(options.get("octreeResolution"), 384, 64, 2048),
-                    mc_level=as_float(options.get("mcLevel"), 0.0, -10, 10),
-                    mc_algo=str(options.get("mcAlgo", "mc")) or None,
-                    num_chunks=as_int(options.get("numChunks"), 8000, 1024, 999999),
-                    enable_pbar=False,
-                )
-                mesh = meshes[0]
-                mesh.export(intermediate_mesh)
-                emit("stage_done", f"Mesh saved: {intermediate_mesh.name}", path=str(image_path), output=str(intermediate_mesh))
+                if mode != "textureOnly":
+                    assert shape_pipeline is not None
+                    image = load_condition_image(image_path)
+                    seed = seed_value(options, "meshSeed", "meshSeedMode")
+                    generator = torch.Generator(device="cuda").manual_seed(seed % (2**32))
+                    emit("stage_start", f"Generating mesh for {image_path.name}", path=str(image_path))
+                    meshes = shape_pipeline(
+                        image=image,
+                        num_inference_steps=as_int(options.get("meshSteps"), 50, 1, 200),
+                        guidance_scale=as_float(options.get("meshGuidance"), 5.0, 0, 30),
+                        generator=generator,
+                        box_v=as_float(options.get("boxV"), 1.01, 0.1, 5),
+                        octree_resolution=as_int(options.get("octreeResolution"), 384, 64, 2048),
+                        mc_level=as_float(options.get("mcLevel"), 0.0, -10, 10),
+                        mc_algo=str(options.get("mcAlgo", "mc")) or None,
+                        num_chunks=as_int(options.get("numChunks"), 8000, 1024, 999999),
+                        enable_pbar=False,
+                    )
+                    mesh = meshes[0]
+                    mesh.export(intermediate_mesh)
+                    emit("stage_done", f"Mesh generated for {image_path.name}", path=str(image_path))
 
-            if mode == "meshOnly":
-                shutil.copy2(intermediate_mesh, final_mesh_path)
-                outputs.append(str(final_mesh_path.resolve()))
-            else:
-                assert paint_pipeline is not None
-                mesh_source = (
-                    Path(str(options.get("meshInputPath", "")).strip())
-                    if mode == "textureOnly"
-                    else intermediate_mesh
-                )
-                if not mesh_source.is_file():
-                    raise RuntimeError(f"Source mesh was not found: {mesh_source}")
-                output_obj = final_mesh_path.with_suffix(".obj")
-                emit("stage_start", f"Generating PBR texture for {image_path.name}", path=str(image_path))
-                result = paint_pipeline(
-                    mesh_path=str(mesh_source),
-                    image_path=str(image_path),
-                    output_mesh_path=str(output_obj),
-                    use_remesh=False,
-                    save_glb=True,
-                )
-                result_path = Path(str(result)) if result else output_obj
-                glb_candidate = output_obj.with_suffix(".glb")
-                if glb_candidate.exists() and glb_candidate != final_mesh_path:
-                    if final_mesh_path.exists() and overwrite:
-                        final_mesh_path.unlink()
-                    shutil.move(str(glb_candidate), str(final_mesh_path))
-                elif result_path.suffix.lower() == ".glb" and result_path.exists() and result_path != final_mesh_path:
-                    if final_mesh_path.exists() and overwrite:
-                        final_mesh_path.unlink()
-                    shutil.move(str(result_path), str(final_mesh_path))
-                outputs.extend(find_existing_output(final_mesh_path, output_obj, output_obj.with_suffix(".jpg")))
+                if mode == "meshOnly":
+                    shutil.move(str(intermediate_mesh), str(final_mesh_path))
+                    outputs.append(str(final_mesh_path.resolve()))
+                else:
+                    assert paint_pipeline is not None
+                    mesh_source = (
+                        Path(str(options.get("meshInputPath", "")).strip())
+                        if mode == "textureOnly"
+                        else intermediate_mesh
+                    )
+                    if not mesh_source.is_file():
+                        raise RuntimeError(f"Source mesh was not found: {mesh_source}")
+                    output_obj = final_mesh_path.with_suffix(".obj")
+                    emit("stage_start", f"Generating PBR texture for {image_path.name}", path=str(image_path))
+                    result = paint_pipeline(
+                        mesh_path=str(mesh_source),
+                        image_path=str(image_path),
+                        output_mesh_path=str(output_obj),
+                        use_remesh=False,
+                        save_glb=True,
+                    )
+                    result_path = Path(str(result)) if result else output_obj
+                    glb_candidate = output_obj.with_suffix(".glb")
+                    if glb_candidate.exists() and glb_candidate != final_mesh_path:
+                        if final_mesh_path.exists() and overwrite:
+                            final_mesh_path.unlink()
+                        shutil.move(str(glb_candidate), str(final_mesh_path))
+                    elif result_path.suffix.lower() == ".glb" and result_path.exists() and result_path != final_mesh_path:
+                        if final_mesh_path.exists() and overwrite:
+                            final_mesh_path.unlink()
+                        shutil.move(str(result_path), str(final_mesh_path))
+                    outputs.extend(find_existing_output(final_mesh_path, output_obj, output_obj.with_suffix(".jpg")))
 
-            emit("image_done", "Saved output", path=str(image_path), outputs=outputs)
-        except Exception as error:
-            failed_count += 1
-            emit("image_error", str(error), path=str(image_path), traceback=traceback.format_exc())
+                emit("image_done", "Saved output", path=str(image_path), outputs=outputs)
+            except Exception as error:
+                failed_count += 1
+                emit("image_error", str(error), path=str(image_path), traceback=traceback.format_exc())
 
-    if failed_count:
-        emit("done", "Batch finished with errors.", failedCount=failed_count, totalCount=total)
-    else:
-        emit("done", "Batch finished.", failedCount=0, totalCount=total)
+        if failed_count:
+            emit("done", "Batch finished with errors.", failedCount=failed_count, totalCount=total)
+        else:
+            emit("done", "Batch finished.", failedCount=0, totalCount=total)
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def run_managed_job(job: dict[str, Any]) -> None:
