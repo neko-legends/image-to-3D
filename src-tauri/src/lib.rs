@@ -520,7 +520,7 @@ fn configure_worker_command(command: &mut Command) {
         .env("PYTHONIOENCODING", "utf-8:replace")
         .env("PYTHONLEGACYWINDOWSSTDIO", "0")
         .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-        .env("TQDM_ASCII", "1");
+        .env_remove("TQDM_ASCII");
     #[cfg(unix)]
     {
         command.process_group(0);
@@ -1224,7 +1224,9 @@ fn handle_agent_route(
             "version": env!("CARGO_PKG_VERSION"),
             "url": agent_status_from(agent_state, active_jobs)?.url
         })),
-        ("GET", "/openapi.json") => Ok(agent_openapi(agent_status_from(agent_state, active_jobs)?.port)),
+        ("GET", "/openapi.json") => Ok(agent_openapi(
+            agent_status_from(agent_state, active_jobs)?.port,
+        )),
         ("GET", "/status") => {
             let status = agent_status_from(agent_state, active_jobs)?;
             serde_json::to_value(status).map_err(|error| error.to_string())

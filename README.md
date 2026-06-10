@@ -19,7 +19,7 @@ Use the app like a normal desktop tool.
    Or run the installer:
 
    ```text
-   release\installer\Image To Hunyuan 3D_26.6.17_x64-setup.exe
+   release\installer\Image To Hunyuan 3D_26.6.18_x64-setup.exe
    ```
 
 2. On first launch, the app checks what is already installed. If setup is
@@ -124,7 +124,7 @@ npm run release:build
 Release outputs:
 
 - `release\portable\image-to-hunyuan-3d.exe`
-- `release\installer\Image To Hunyuan 3D_26.6.17_x64-setup.exe`
+- `release\installer\Image To Hunyuan 3D_26.6.18_x64-setup.exe`
 
 ### Headless Runner
 

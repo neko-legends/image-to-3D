@@ -33,7 +33,7 @@ def configure_text_streams() -> None:
 configure_text_streams()
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8:replace")
-os.environ.setdefault("TQDM_ASCII", "1")
+os.environ.pop("TQDM_ASCII", None)
 
 
 HUNYUAN_REPO = "Tencent-Hunyuan/Hunyuan3D-2.1"
@@ -46,7 +46,7 @@ ENV_MARKER = ".ih3d-env-v3-ready"
 SOURCE_MARKER = ".ih3d-source-v1-ready"
 MODEL_MARKER = ".ih3d-models-v1-ready"
 WHEEL_MARKER = ".ih3d-texture-wheels-v1-ready"
-BOOTSTRAP_PACKAGES = ["pip>=24.3", "setuptools>=70.0", "wheel>=0.43"]
+BOOTSTRAP_PACKAGES = ["pip>=24.3", "setuptools<81", "wheel>=0.43"]
 DEFAULT_PYTORCH_PROFILE = "cu124"
 PYTORCH_RUNTIME_PROFILES = {
     "cu124": {
@@ -189,6 +189,19 @@ def python_version(python_path: Path) -> tuple[int, int, int] | None:
     except Exception:
         return None
     return parse_python_version(output)
+
+
+def python_can_import(python_path: Path, module_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            [str(python_path), "-c", f"import {module_name}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 def supported_python_version(version: tuple[int, int, int] | None) -> bool:
@@ -541,6 +554,48 @@ def ensure_source(paths: dict[str, Path]) -> Path:
 
 
 def patch_hunyuan_source(source_dir: Path) -> None:
+    mesh_utils = source_dir / "hy3dpaint" / "DifferentiableRenderer" / "mesh_utils.py"
+    if mesh_utils.is_file():
+        content = mesh_utils.read_text(encoding="utf-8")
+        original = content
+        content = content.replace(
+            "import cv2\nimport bpy\nimport math",
+            "import cv2\ntry:\n    import bpy\nexcept ImportError:\n    bpy = None\nimport math",
+        )
+        if content != original:
+            mesh_utils.write_text(content, encoding="utf-8")
+            emit("setup", "Patched Hunyuan mesh IO for standalone texture loading")
+
+    mesh_render = source_dir / "hy3dpaint" / "DifferentiableRenderer" / "MeshRender.py"
+    if mesh_render.is_file():
+        content = mesh_render.read_text(encoding="utf-8")
+        original = content
+        content = content.replace(
+            "try:\n"
+            "    from .mesh_inpaint_processor import meshVerticeInpaint  # , meshVerticeColor\n"
+            "except:\n"
+            '    print("InPaint Function CAN NOT BE Imported!!!")',
+            "try:\n"
+            "    from .mesh_inpaint_processor import meshVerticeInpaint  # , meshVerticeColor\n"
+            "except Exception:\n"
+            "    try:\n"
+            "        from mesh_inpaint_processor import meshVerticeInpaint\n"
+            "    except Exception:\n"
+            "        meshVerticeInpaint = None\n"
+            '        print("InPaint Function CAN NOT BE Imported!!!")',
+        )
+        content = content.replace(
+            "        if vertex_inpaint:\n"
+            "            vtx_pos, pos_idx, vtx_uv, uv_idx = self.get_mesh()\n"
+            "            texture_np, mask = meshVerticeInpaint(texture_np, mask, vtx_pos, vtx_uv, pos_idx, uv_idx)",
+            "        if vertex_inpaint and meshVerticeInpaint is not None:\n"
+            "            vtx_pos, pos_idx, vtx_uv, uv_idx = self.get_mesh()\n"
+            "            texture_np, mask = meshVerticeInpaint(texture_np, mask, vtx_pos, vtx_uv, pos_idx, uv_idx)",
+        )
+        if content != original:
+            mesh_render.write_text(content, encoding="utf-8")
+            emit("setup", "Patched Hunyuan texture inpaint import for standalone wheels")
+
     texture_pipeline = source_dir / "hy3dpaint" / "textureGenPipeline.py"
     if not texture_pipeline.is_file():
         return
@@ -630,6 +685,16 @@ def install_texture_wheels(python_path: Path, paths: dict[str, Path]) -> None:
     marker.write_text("ok\n", encoding="utf-8")
 
 
+def ensure_pkg_resources(python_path: Path) -> None:
+    if python_can_import(python_path, "pkg_resources"):
+        return
+    pip = [str(python_path), "-m", "pip"]
+    run_checked(
+        pip + ["install", "--upgrade", "setuptools<81"],
+        "Installing setuptools compatibility package",
+    )
+
+
 def ensure_env(paths: dict[str, Path], source_dir: Path, pytorch_profile: str) -> Path:
     env_dir = paths["env_dir"]
     python_path = venv_python(env_dir)
@@ -655,6 +720,7 @@ def ensure_env(paths: dict[str, Path], source_dir: Path, pytorch_profile: str) -
         raise RuntimeError("Image To Hunyuan 3D requires Python 3.10, 3.11, or 3.12.")
 
     if marker.exists():
+        ensure_pkg_resources(python_path)
         return python_path
 
     profile = PYTORCH_RUNTIME_PROFILES[pytorch_profile]
@@ -671,6 +737,7 @@ def ensure_env(paths: dict[str, Path], source_dir: Path, pytorch_profile: str) -
     )
     run_checked(pip + ["install", "--upgrade", "numpy==1.26.4"], "Pinning compatible NumPy")
     install_texture_wheels(python_path, paths)
+    ensure_pkg_resources(python_path)
     marker.write_text(f"pytorch={pytorch_profile}\n", encoding="utf-8")
     return python_path
 
@@ -696,7 +763,7 @@ def managed_env_vars(app_data_dir: Path, paths: dict[str, Path]) -> dict[str, st
     env["PYTHONIOENCODING"] = "utf-8:replace"
     env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
     env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-    env["TQDM_ASCII"] = "1"
+    env.pop("TQDM_ASCII", None)
     env["XFORMERS_FORCE_DISABLE_TRITON"] = "1"
     env["IH3D_APP_DATA_DIR"] = str(app_data_dir)
     return env

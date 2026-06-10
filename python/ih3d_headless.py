@@ -12,6 +12,22 @@ from pathlib import Path
 APP_ID = "public.image.to.hunyuan3d"
 
 
+def configure_text_streams() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+configure_text_streams()
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8:replace")
+os.environ.pop("TQDM_ASCII", None)
+
+
 def default_app_data_dir() -> Path:
     if os.name == "nt":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
@@ -112,7 +128,7 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
         "runtimeProfile": args.runtime_profile,
         "outputDir": str(Path(args.output_dir).resolve()) if args.output_dir else None,
         "outputName": args.output_name,
-        "meshInputPath": args.mesh_input_path,
+        "meshInputPath": str(Path(args.mesh_input_path).resolve()) if args.mesh_input_path else None,
         "overwrite": args.overwrite if args.overwrite else None,
         "meshSteps": args.mesh_steps,
         "meshGuidance": args.mesh_guidance,
