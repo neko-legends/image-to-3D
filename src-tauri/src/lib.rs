@@ -1814,6 +1814,12 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                let managed_workers = window.state::<ManagedWorkerState>();
+                let _ = managed_workers.stop();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             cancel_active_job,
             check_runtime,

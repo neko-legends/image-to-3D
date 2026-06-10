@@ -162,7 +162,8 @@ type PreviewImages = {
 };
 
 const APP_VERSION = "v26.6.20";
-const SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
+const SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v3";
+const LEGACY_SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
 const AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
 const AGENT_PORT_STORAGE_KEY = "imageToHunyuan3D.agentApiPort.v1";
 const DEFAULT_AGENT_API_PORT = 17333;
@@ -283,8 +284,10 @@ function loadSavedOptions(): HunyuanOptions {
   if (typeof window === "undefined") return defaultOptions;
   try {
     const saved = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
-    if (!saved) return defaultOptions;
-    const parsed = JSON.parse(saved) as Partial<HunyuanOptions>;
+    const savedFromLegacyKey = saved === null;
+    const rawSaved = saved ?? window.localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY);
+    if (!rawSaved) return defaultOptions;
+    const parsed = JSON.parse(rawSaved) as Partial<HunyuanOptions>;
     const meshSteps = coerceNumber(parsed.meshSteps, defaultOptions.meshSteps, 1, 200);
     const octreeResolution = coerceNumber(parsed.octreeResolution, defaultOptions.octreeResolution, 64, 2048);
     const numChunks = coerceNumber(parsed.numChunks, defaultOptions.numChunks, 1024, 999999);
@@ -320,7 +323,9 @@ function loadSavedOptions(): HunyuanOptions {
       maxFaces: coerceNumber(parsed.maxFaces, defaultOptions.maxFaces, 1000, 200000),
       smoothNormals: coerceBoolean(parsed.smoothNormals, defaultOptions.smoothNormals),
       textureViewSize: coerceNumber(parsed.textureViewSize, defaultOptions.textureViewSize, 256, 2048),
-      textureSteps: coerceNumber(parsed.textureSteps, defaultOptions.textureSteps, 1, 100),
+      textureSteps: savedFromLegacyKey && parsed.textureSteps === 10
+        ? defaultOptions.textureSteps
+        : coerceNumber(parsed.textureSteps, defaultOptions.textureSteps, 1, 100),
       textureGuidance: coerceNumber(parsed.textureGuidance, defaultOptions.textureGuidance, 0, 30),
       textureSize: coerceNumber(parsed.textureSize, defaultOptions.textureSize, 512, 8192),
       textureSeed: coerceNumber(parsed.textureSeed, defaultOptions.textureSeed, 0, 999999999),
