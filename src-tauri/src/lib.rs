@@ -88,6 +88,7 @@ struct HunyuanOptions {
     mesh_input_path: String,
     recursive: bool,
     overwrite: bool,
+    mesh_detail: String,
     mesh_steps: u32,
     mesh_guidance: f32,
     mesh_seed: u64,
@@ -340,6 +341,7 @@ fn default_hunyuan_options() -> HunyuanOptions {
         mesh_input_path: String::new(),
         recursive: true,
         overwrite: false,
+        mesh_detail: "medium".to_string(),
         mesh_steps: 50,
         mesh_guidance: 5.0,
         mesh_seed: 2,
@@ -370,7 +372,32 @@ fn default_hunyuan_options() -> HunyuanOptions {
     }
 }
 
+fn apply_mesh_detail_preset(options: &mut HunyuanOptions) {
+    match options.mesh_detail.as_str() {
+        "low" => {
+            options.mesh_steps = 24;
+            options.octree_resolution = 256;
+            options.num_chunks = 6000;
+        }
+        "medium" => {
+            options.mesh_steps = 50;
+            options.octree_resolution = 384;
+            options.num_chunks = 8000;
+        }
+        "high" => {
+            options.mesh_steps = 80;
+            options.octree_resolution = 512;
+            options.num_chunks = 12000;
+        }
+        "custom" => {}
+        _ => {
+            options.mesh_detail = "custom".to_string();
+        }
+    }
+}
+
 fn normalize_options_for_job(options: &mut HunyuanOptions) -> Result<(), String> {
+    apply_mesh_detail_preset(options);
     if options.output_dir.trim().is_empty() {
         options.output_dir = default_output_dir()?.display().to_string();
     } else {
@@ -1205,6 +1232,15 @@ fn agent_options_from_request(
     let base = merged
         .as_object_mut()
         .ok_or_else(|| "Unable to merge default options.".to_string())?;
+    let mesh_numbers_overridden = ["meshSteps", "octreeResolution", "numChunks"]
+        .iter()
+        .any(|key| overrides.contains_key(*key));
+    if mesh_numbers_overridden && !overrides.contains_key("meshDetail") {
+        base.insert(
+            "meshDetail".to_string(),
+            serde_json::Value::String("custom".to_string()),
+        );
+    }
     for (key, value) in overrides {
         base.insert(key.clone(), value.clone());
     }

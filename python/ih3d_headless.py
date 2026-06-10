@@ -10,6 +10,11 @@ from pathlib import Path
 
 
 APP_ID = "public.image.to.hunyuan3d"
+MESH_DETAIL_PRESETS = {
+    "low": {"meshSteps": 24, "octreeResolution": 256, "numChunks": 6000},
+    "medium": {"meshSteps": 50, "octreeResolution": 384, "numChunks": 8000},
+    "high": {"meshSteps": 80, "octreeResolution": 512, "numChunks": 12000},
+}
 
 
 def configure_text_streams() -> None:
@@ -52,6 +57,7 @@ def default_options(root: Path) -> dict[str, object]:
         "meshInputPath": "",
         "recursive": True,
         "overwrite": False,
+        "meshDetail": "medium",
         "meshSteps": 50,
         "meshGuidance": 5.0,
         "meshSeed": 2,
@@ -98,6 +104,7 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-name", default="")
     parser.add_argument("--mesh-input-path", default="")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--mesh-detail", choices=["low", "medium", "high", "custom"], default=None)
     parser.add_argument("--mesh-steps", type=int, default=None)
     parser.add_argument("--mesh-guidance", type=float, default=None)
     parser.add_argument("--mesh-seed", type=int, default=None)
@@ -117,11 +124,17 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
         options.update(
             {
                 "mode": "meshOnly",
+                "meshDetail": "custom",
                 "meshSteps": 12,
                 "octreeResolution": 256,
                 "numChunks": 6000,
             }
         )
+    if args.mesh_detail:
+        options["meshDetail"] = args.mesh_detail
+        if args.mesh_detail in MESH_DETAIL_PRESETS:
+            options.update(MESH_DETAIL_PRESETS[args.mesh_detail])
+
     overrides = {
         "mode": args.mode,
         "cudaDevice": args.cuda_device,
@@ -130,18 +143,25 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
         "outputName": args.output_name,
         "meshInputPath": str(Path(args.mesh_input_path).resolve()) if args.mesh_input_path else None,
         "overwrite": args.overwrite if args.overwrite else None,
-        "meshSteps": args.mesh_steps,
         "meshGuidance": args.mesh_guidance,
         "meshSeed": args.mesh_seed,
         "meshSeedMode": args.mesh_seed_mode,
-        "octreeResolution": args.octree_resolution,
-        "numChunks": args.num_chunks,
         "textureViewSize": args.texture_view_size,
         "textureSize": args.texture_size,
     }
     for key, value in overrides.items():
         if value is not None:
             options[key] = value
+    mesh_overrides = {
+        "meshSteps": args.mesh_steps,
+        "octreeResolution": args.octree_resolution,
+        "numChunks": args.num_chunks,
+    }
+    if any(value is not None for value in mesh_overrides.values()):
+        options["meshDetail"] = "custom"
+        for key, value in mesh_overrides.items():
+            if value is not None:
+                options[key] = value
     return options
 
 

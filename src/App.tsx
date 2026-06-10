@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type PipelineMode = "meshTexture" | "meshOnly" | "textureOnly";
 type SeedMode = "fixed" | "randomize";
+type MeshDetail = "low" | "medium" | "high" | "custom";
 type QueueStatus = "pending" | "running" | "done" | "error" | "canceled";
 type ActiveAction = "setup" | "generate" | null;
 
@@ -85,6 +86,7 @@ type HunyuanOptions = {
   meshInputPath: string;
   recursive: boolean;
   overwrite: boolean;
+  meshDetail: MeshDetail;
   meshSteps: number;
   meshGuidance: number;
   meshSeed: number;
@@ -147,6 +149,7 @@ type WorkerEvent = {
   percent?: number;
   failedCount?: number;
   totalCount?: number;
+  elapsedSeconds?: number;
 };
 
 type PreviewImages = {
@@ -154,11 +157,29 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.6.18";
+const APP_VERSION = "v26.6.19";
 const SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
 const AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
 const AGENT_PORT_STORAGE_KEY = "imageToHunyuan3D.agentApiPort.v1";
 const DEFAULT_AGENT_API_PORT = 17333;
+
+const meshDetailPresets: Record<Exclude<MeshDetail, "custom">, Pick<HunyuanOptions, "meshSteps" | "octreeResolution" | "numChunks">> = {
+  low: {
+    meshSteps: 24,
+    octreeResolution: 256,
+    numChunks: 6000
+  },
+  medium: {
+    meshSteps: 50,
+    octreeResolution: 384,
+    numChunks: 8000
+  },
+  high: {
+    meshSteps: 80,
+    octreeResolution: 512,
+    numChunks: 12000
+  }
+};
 
 const defaultOptions: HunyuanOptions = {
   mode: "meshTexture",
@@ -169,6 +190,7 @@ const defaultOptions: HunyuanOptions = {
   meshInputPath: "",
   recursive: true,
   overwrite: false,
+  meshDetail: "medium",
   meshSteps: 50,
   meshGuidance: 5,
   meshSeed: 2,
@@ -237,12 +259,30 @@ function coerceSeedMode(value: unknown, fallback: SeedMode): SeedMode {
   return value === "fixed" || value === "randomize" ? value : fallback;
 }
 
+function coerceMeshDetail(value: unknown, fallback: MeshDetail): MeshDetail {
+  return value === "low" || value === "medium" || value === "high" || value === "custom" ? value : fallback;
+}
+
+function detailFromMeshSettings(options: Pick<HunyuanOptions, "meshSteps" | "octreeResolution" | "numChunks">): MeshDetail {
+  const match = Object.entries(meshDetailPresets).find(
+    ([, preset]) =>
+      preset.meshSteps === options.meshSteps &&
+      preset.octreeResolution === options.octreeResolution &&
+      preset.numChunks === options.numChunks
+  );
+  return (match?.[0] as MeshDetail | undefined) ?? "custom";
+}
+
 function loadSavedOptions(): HunyuanOptions {
   if (typeof window === "undefined") return defaultOptions;
   try {
     const saved = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!saved) return defaultOptions;
     const parsed = JSON.parse(saved) as Partial<HunyuanOptions>;
+    const meshSteps = coerceNumber(parsed.meshSteps, defaultOptions.meshSteps, 1, 200);
+    const octreeResolution = coerceNumber(parsed.octreeResolution, defaultOptions.octreeResolution, 64, 2048);
+    const numChunks = coerceNumber(parsed.numChunks, defaultOptions.numChunks, 1024, 999999);
+    const inferredMeshDetail = detailFromMeshSettings({ meshSteps, octreeResolution, numChunks });
     return {
       mode: coerceMode(parsed.mode, defaultOptions.mode),
       cudaDevice: coerceString(parsed.cudaDevice, defaultOptions.cudaDevice),
@@ -252,13 +292,14 @@ function loadSavedOptions(): HunyuanOptions {
       meshInputPath: coerceString(parsed.meshInputPath, defaultOptions.meshInputPath),
       recursive: coerceBoolean(parsed.recursive, defaultOptions.recursive),
       overwrite: coerceBoolean(parsed.overwrite, defaultOptions.overwrite),
-      meshSteps: coerceNumber(parsed.meshSteps, defaultOptions.meshSteps, 1, 200),
+      meshDetail: coerceMeshDetail(parsed.meshDetail, inferredMeshDetail),
+      meshSteps,
       meshGuidance: coerceNumber(parsed.meshGuidance, defaultOptions.meshGuidance, 0, 30),
       meshSeed: coerceNumber(parsed.meshSeed, defaultOptions.meshSeed, 0, 999999999),
       meshSeedMode: coerceSeedMode(parsed.meshSeedMode, defaultOptions.meshSeedMode),
       boxV: coerceNumber(parsed.boxV, defaultOptions.boxV, 0.1, 5),
-      octreeResolution: coerceNumber(parsed.octreeResolution, defaultOptions.octreeResolution, 64, 2048),
-      numChunks: coerceNumber(parsed.numChunks, defaultOptions.numChunks, 1024, 999999),
+      octreeResolution,
+      numChunks,
       mcLevel: coerceNumber(parsed.mcLevel, defaultOptions.mcLevel, -10, 10),
       mcAlgo: coerceString(parsed.mcAlgo, defaultOptions.mcAlgo),
       enableFlashVdm: coerceBoolean(parsed.enableFlashVdm, defaultOptions.enableFlashVdm),
@@ -646,7 +687,7 @@ function App() {
               ? {
                   ...item,
                   status: "done",
-                  message: "Saved",
+                  message: payload.message ?? "Saved",
                   outputHistory: [...outputs, ...(item.outputHistory ?? [])]
                 }
               : item
@@ -983,6 +1024,26 @@ function App() {
               <Box size={16} />
               Mesh
             </div>
+            <label className="field">
+              <span>Detail</span>
+              <select
+                value={options.meshDetail}
+                disabled={options.mode === "textureOnly"}
+                onChange={(event) => {
+                  const meshDetail = event.target.value as MeshDetail;
+                  setOptions((current) =>
+                    meshDetail === "custom"
+                      ? { ...current, meshDetail }
+                      : { ...current, meshDetail, ...meshDetailPresets[meshDetail] }
+                  );
+                }}
+              >
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
             <div className="split-fields">
               <label className="field">
                 <span>Steps</span>
@@ -993,7 +1054,11 @@ function App() {
                   value={options.meshSteps}
                   disabled={options.mode === "textureOnly"}
                   onChange={(event) =>
-                    setOptions((current) => ({ ...current, meshSteps: Number(event.target.value) || current.meshSteps }))
+                    setOptions((current) => ({
+                      ...current,
+                      meshDetail: "custom",
+                      meshSteps: Number(event.target.value) || current.meshSteps
+                    }))
                   }
                 />
               </label>
@@ -1027,6 +1092,7 @@ function App() {
                   onChange={(event) =>
                     setOptions((current) => ({
                       ...current,
+                      meshDetail: "custom",
                       octreeResolution: Number(event.target.value) || current.octreeResolution
                     }))
                   }
@@ -1041,7 +1107,11 @@ function App() {
                   value={options.numChunks}
                   disabled={options.mode === "textureOnly"}
                   onChange={(event) =>
-                    setOptions((current) => ({ ...current, numChunks: Number(event.target.value) || current.numChunks }))
+                    setOptions((current) => ({
+                      ...current,
+                      meshDetail: "custom",
+                      numChunks: Number(event.target.value) || current.numChunks
+                    }))
                   }
                 />
               </label>

@@ -19,7 +19,7 @@ Use the app like a normal desktop tool.
    Or run the installer:
 
    ```text
-   release\installer\Image To Hunyuan 3D_26.6.18_x64-setup.exe
+   release\installer\Image To Hunyuan 3D_26.6.19_x64-setup.exe
    ```
 
 2. On first launch, the app checks what is already installed. If setup is
@@ -43,7 +43,13 @@ Use the app like a normal desktop tool.
    - `Mesh only` creates a faster mesh preview GLB.
    - `Texture only` textures an existing `.glb`, `.gltf`, `.obj`, or `.ply`.
 
-6. Generated GLBs go into an `output` folder beside the running app by default.
+6. Pick mesh detail:
+
+   - `Low` is faster for previews.
+   - `Medium` is the default balance.
+   - `High` spends more time on a denser mesh.
+
+7. Generated GLBs go into an `output` folder beside the running app by default.
    If you choose a different output folder, the app remembers it.
 
 ComfyUI is not required. The app manages its own Python runtime, Hunyuan source,
@@ -124,7 +130,7 @@ npm run release:build
 Release outputs:
 
 - `release\portable\image-to-hunyuan-3d.exe`
-- `release\installer\Image To Hunyuan 3D_26.6.18_x64-setup.exe`
+- `release\installer\Image To Hunyuan 3D_26.6.19_x64-setup.exe`
 
 ### Headless Runner
 
@@ -204,6 +210,7 @@ Common options:
 - `outputName`
 - `meshInputPath`
 - `overwrite`
+- `meshDetail`
 - `meshSteps`
 - `meshGuidance`
 - `meshSeed`
@@ -229,9 +236,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:17333/generate -ContentType
     outputDir = 'D:\models'
     outputName = 'chair-preview'
     overwrite = $true
-    meshSteps = 12
-    octreeResolution = 256
-    numChunks = 6000
+    meshDetail = 'low'
   }
 } | ConvertTo-Json -Depth 6)
 ```

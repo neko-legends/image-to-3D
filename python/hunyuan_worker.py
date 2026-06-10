@@ -875,6 +875,17 @@ def as_float(value: Any, default: float, minimum: float | None = None, maximum: 
     return number
 
 
+def format_elapsed(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remaining_seconds = divmod(int(round(seconds)), 60)
+    if minutes < 60:
+        return f"{minutes}m {remaining_seconds:02d}s"
+    hours, remaining_minutes = divmod(minutes, 60)
+    return f"{hours}h {remaining_minutes:02d}m {remaining_seconds:02d}s"
+
+
 def seed_value(options: dict[str, Any], key: str, mode_key: str) -> int:
     if str(options.get(mode_key, "fixed")) == "randomize":
         return random.randint(0, 999_999_999)
@@ -981,6 +992,7 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     input_paths = [Path(path) for path in job.get("paths", [])]
     total = len(input_paths)
     failed_count = 0
+    batch_started = time.perf_counter()
 
     try:
         shape_pipeline = None
@@ -1004,6 +1016,7 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
             paint_pipeline = Hunyuan3DPaintPipeline(config)
 
         for index, image_path in enumerate(input_paths):
+            image_started = time.perf_counter()
             emit("image_start", f"Processing {image_path.name}", path=str(image_path))
             try:
                 if not image_path.is_file():
@@ -1069,15 +1082,30 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                         shutil.move(str(result_path), str(final_mesh_path))
                     outputs.extend(find_existing_output(final_mesh_path, output_obj, output_obj.with_suffix(".jpg")))
 
-                emit("image_done", "Saved output", path=str(image_path), outputs=outputs)
+                elapsed_seconds = time.perf_counter() - image_started
+                emit(
+                    "image_done",
+                    f"Saved output in {format_elapsed(elapsed_seconds)}",
+                    path=str(image_path),
+                    outputs=outputs,
+                    elapsedSeconds=round(elapsed_seconds, 3),
+                )
             except Exception as error:
                 failed_count += 1
-                emit("image_error", str(error), path=str(image_path), traceback=traceback.format_exc())
+                elapsed_seconds = time.perf_counter() - image_started
+                emit(
+                    "image_error",
+                    f"{error} after {format_elapsed(elapsed_seconds)}",
+                    path=str(image_path),
+                    elapsedSeconds=round(elapsed_seconds, 3),
+                    traceback=traceback.format_exc(),
+                )
 
+        batch_elapsed = format_elapsed(time.perf_counter() - batch_started)
         if failed_count:
-            emit("done", "Batch finished with errors.", failedCount=failed_count, totalCount=total)
+            emit("done", f"Batch finished with errors in {batch_elapsed}.", failedCount=failed_count, totalCount=total)
         else:
-            emit("done", "Batch finished.", failedCount=0, totalCount=total)
+            emit("done", f"Batch finished in {batch_elapsed}.", failedCount=0, totalCount=total)
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 
