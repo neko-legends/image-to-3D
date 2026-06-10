@@ -19,13 +19,14 @@ Use the app like a normal desktop tool.
    Or run the installer:
 
    ```text
-   release\installer\Image To Hunyuan 3D_26.6.19_x64-setup.exe
+   release\installer\Image To Hunyuan 3D_26.6.20_x64-setup.exe
    ```
 
 2. On first launch, the app checks what is already installed. If setup is
    needed, it asks before downloading models or installing packages.
 
-3. Add an image or a folder of images.
+3. Add an image or a folder of images. You can also drop a `.glb` or `.gltf`
+   file into the window to preview it without starting a generation job.
 
 4. Pick the CUDA GPU and PyTorch runtime in the Runtime panel if you have more
    than one NVIDIA GPU.
@@ -130,7 +131,7 @@ npm run release:build
 Release outputs:
 
 - `release\portable\image-to-hunyuan-3d.exe`
-- `release\installer\Image To Hunyuan 3D_26.6.19_x64-setup.exe`
+- `release\installer\Image To Hunyuan 3D_26.6.20_x64-setup.exe`
 
 ### Headless Runner
 

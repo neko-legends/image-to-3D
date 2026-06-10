@@ -157,7 +157,7 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.6.19";
+const APP_VERSION = "v26.6.20";
 const SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
 const AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
 const AGENT_PORT_STORAGE_KEY = "imageToHunyuan3D.agentApiPort.v1";
@@ -223,6 +223,7 @@ const defaultOptions: HunyuanOptions = {
 const isTauriRuntime = () => "__TAURI_INTERNALS__" in window || "__TAURI__" in window;
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 const isModelFile = (path: string) => /\.(glb|gltf|obj|ply)$/i.test(path);
+const isPreviewableModelFile = (path: string) => /\.(glb|gltf)$/i.test(path);
 const isPreviewableImage = (path: string) => /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(path);
 const isTemporaryJobOutput = (path: string) => /[\\/]jobs[\\/]/i.test(path);
 
@@ -368,7 +369,7 @@ function parseOutputPaths(output?: string, outputs?: string[]) {
 }
 
 function choosePreviewModel(paths?: string[]) {
-  const models = paths?.filter(isModelFile) ?? [];
+  const models = paths?.filter(isPreviewableModelFile) ?? [];
   return models.find((path) => !isTemporaryJobOutput(path)) ?? models[0];
 }
 
@@ -444,12 +445,13 @@ function App() {
   const activeActionRef = useRef<ActiveAction>(null);
   const setupPromptSeenRef = useRef(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [previewModelPath, setPreviewModelPath] = useState<string | null>(null);
   const [previewImages, setPreviewImages] = useState<PreviewImages>({});
   const [busy, setBusy] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [showSetupPrompt, setShowSetupPrompt] = useState(false);
-  const [headline, setHeadline] = useState("Prepare runtime or drop images");
+  const [headline, setHeadline] = useState("Prepare runtime or drop files");
   const [log, setLog] = useState<string[]>([]);
 
   const vramDisplay = useMemo(() => formatVram(vram), [vram]);
@@ -460,8 +462,8 @@ function App() {
     [queue, selectedPath]
   );
   const selectedModel = useMemo(
-    () => choosePreviewModel(selectedItem?.outputHistory),
-    [selectedItem]
+    () => previewModelPath ?? choosePreviewModel(selectedItem?.outputHistory),
+    [previewModelPath, selectedItem]
   );
   const modelUrl = useMemo(
     () => (selectedModel && isTauriRuntime() ? convertFileSrc(selectedModel) : ""),
@@ -571,6 +573,33 @@ function App() {
     [options.recursive, selectedPath]
   );
 
+  const previewModel = useCallback(
+    (path: string, source: "dropped" | "selected" | "generated" = "selected") => {
+      setPreviewModelPath(path);
+      setHeadline(`Previewing ${fileName(path)}`);
+      if (source === "dropped") {
+        pushLog(`Previewing dropped model: ${path}`);
+      }
+    },
+    [pushLog]
+  );
+
+  const handleDroppedPaths = useCallback(
+    async (paths: string[]) => {
+      if (!paths.length) return;
+      const previewableModels = paths.filter(isPreviewableModelFile);
+      const inputPaths = paths.filter((path) => !isPreviewableModelFile(path));
+
+      if (previewableModels.length > 0) {
+        previewModel(previewableModels[0], "dropped");
+      }
+      if (inputPaths.length > 0) {
+        await addInputs(inputPaths);
+      }
+    },
+    [addInputs, previewModel]
+  );
+
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
@@ -647,14 +676,14 @@ function App() {
         }
         if (event.payload.type === "drop") {
           setDragging(false);
-          void addInputs(event.payload.paths ?? []);
+          void handleDroppedPaths(event.payload.paths ?? []);
         }
       })
       .then((unlisten) => {
         cleanup = unlisten;
       });
     return () => cleanup?.();
-  }, [addInputs]);
+  }, [handleDroppedPaths]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -681,6 +710,10 @@ function App() {
       }
       if (payload.type === "image_done" && payload.path) {
         const outputs = orderOutputPaths(parseOutputPaths(payload.output, payload.outputs));
+        const preview = choosePreviewModel(outputs);
+        if (preview) {
+          previewModel(preview, "generated");
+        }
         setQueue((current) =>
           current.map((item) =>
             item.path === payload.path
@@ -722,7 +755,7 @@ function App() {
       cleanup = unlisten;
     });
     return () => cleanup?.();
-  }, [pushLog, refreshRuntime, refreshVram]);
+  }, [previewModel, pushLog, refreshRuntime, refreshVram]);
 
   useEffect(() => {
     if (!selectedItem || !isTauriRuntime()) {
@@ -796,14 +829,18 @@ function App() {
     });
     if (typeof selected === "string") {
       setOptions((current) => ({ ...current, meshInputPath: selected }));
+      if (isPreviewableModelFile(selected)) {
+        previewModel(selected, "selected");
+      }
     }
-  }, []);
+  }, [previewModel]);
 
   const reset = useCallback(() => {
     setQueue([]);
     setSelectedPath(null);
+    setPreviewModelPath(null);
     setPreviewImages({});
-    setHeadline("Prepare runtime or drop images");
+    setHeadline("Prepare runtime or drop files");
   }, []);
 
   const startRuntimeSetup = useCallback(async () => {
@@ -1285,8 +1322,14 @@ function App() {
               <div className="input-panel-copy">
                 <Download size={24} />
                 <div>
-                  <h3>Drop images or folders</h3>
-                  <p>{selectedItem ? fileName(selectedItem.path) : "No input selected"}</p>
+                  <h3>Drop images, folders, or GLBs</h3>
+                  <p>
+                    {selectedItem
+                      ? fileName(selectedItem.path)
+                      : selectedModel
+                        ? fileName(selectedModel)
+                        : "No input selected"}
+                  </p>
                 </div>
               </div>
               <div className="input-thumb">
@@ -1306,7 +1349,7 @@ function App() {
             <section className="preview-panel">
               <div className="preview-head">
                 <strong>3D Preview</strong>
-                <small>{selectedModel ? fileName(selectedModel) : "No GLB selected"}</small>
+                <small>{selectedModel ? fileName(selectedModel) : "Drop a GLB to preview"}</small>
               </div>
               <div className="model-frame">
                 {modelUrl ? (
@@ -1322,7 +1365,7 @@ function App() {
                 ) : (
                   <div className="preview-empty">
                     <Layers3 size={30} />
-                    No GLB yet
+                    Drop a GLB here
                   </div>
                 )}
               </div>
@@ -1346,7 +1389,10 @@ function App() {
                 <div
                   className={`queue-row ${item.status} ${selectedItem?.path === item.path ? "selected" : ""}`}
                   key={item.path}
-                  onClick={() => setSelectedPath(item.path)}
+                  onClick={() => {
+                    setSelectedPath(item.path);
+                    setPreviewModelPath(null);
+                  }}
                   role="button"
                   tabIndex={0}
                 >
@@ -1366,9 +1412,13 @@ function App() {
                             <button
                               className={isModelFile(path) ? "output-chip model" : "output-chip"}
                               key={path}
-                              title={path}
+                              title={isPreviewableModelFile(path) ? "Preview in 3D viewer" : path}
                               onClick={(event) => {
                                 event.stopPropagation();
+                                if (isPreviewableModelFile(path)) {
+                                  previewModel(path, "selected");
+                                  return;
+                                }
                                 void openDirectPath(path);
                               }}
                             >
