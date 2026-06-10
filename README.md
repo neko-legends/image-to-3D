@@ -1,92 +1,189 @@
 # Image To Hunyuan 3D
 
-Image To Hunyuan 3D is a local desktop app for turning images into Hunyuan3D
-2.1 meshes and textured GLBs without opening ComfyUI.
+Image To Hunyuan 3D turns images into Hunyuan3D 2.1 meshes and textured GLBs
+without opening ComfyUI.
 
-The app follows the same runtime idea as `D:\forPublic\DepthMapAIGenerator`:
-the repository does not contain or commit a `.venv`. On first preparation, the
-desktop app creates its own Python environment in app data, downloads the
-Hunyuan source/runtime pieces, and keeps model weights outside this project
-folder.
-
-Launch is intentionally fast and quiet. The app checks what is already present
-and shows a setup prompt when downloads are needed. It does not download models
-or install packages until the user chooses setup.
-
-## NVIDIA GPU Note
-
-This app is designed for NVIDIA GPUs. Hunyuan3D 2.1 is a large CUDA workload;
+The app is designed for NVIDIA GPUs. Hunyuan3D 2.1 is a large CUDA workload;
 CPU generation is not a supported target.
 
-The upstream Hunyuan3D 2.1 notes list approximate VRAM needs of 10 GB for
-shape generation, 21 GB for texture generation, and 29 GB for shape plus
-texture. Smaller cards may work only with lower settings or future low-VRAM
-work.
+## For Humans
 
-## Runtime Shape
+Use the app like a normal desktop tool.
+
+1. Run the portable app:
+
+   ```text
+   release\portable\image-to-hunyuan-3d.exe
+   ```
+
+   Or run the installer:
+
+   ```text
+   release\installer\Image To Hunyuan 3D_26.6.13_x64-setup.exe
+   ```
+
+2. On first launch, the app checks what is already installed. If setup is
+   needed, it asks before downloading models or installing packages.
+
+3. Add an image or a folder of images.
+
+4. Choose a mode:
+
+   - `Mesh + Texture` creates a textured GLB.
+   - `Mesh only` creates a faster mesh preview GLB.
+   - `Texture only` textures an existing `.glb`, `.gltf`, `.obj`, or `.ply`.
+
+5. Generated GLBs go into an `output` folder beside the running app by default.
+   If you choose a different output folder, the app remembers it.
+
+ComfyUI is not required. The app manages its own Python runtime, Hunyuan source,
+model cache, and texture tools in app data.
+
+If you want an AI agent to control the app while the GUI is open, enable the
+`Agent API` checkbox in the Pipeline panel. Most people can leave it off.
+
+## For AI Agents
+
+This repo is a Tauri 2 + React desktop app with a Python worker. Do not create
+or commit a project `.venv`; the app creates its managed runtime under app data.
 
 Managed app data contains:
 
 - `python-env` - app-owned Python environment.
 - `runtime\Hunyuan3D-2.1` - downloaded Hunyuan source.
-- `runtime\ComfyUI-Hunyuan3d-2-1-wheels` - Windows texture wheels used only as
-  native wheel sources.
+- `runtime\ComfyUI-Hunyuan3d-2-1-wheels` - Windows texture wheel source.
 - `models` - Hugging Face model cache.
 - `jobs` - per-run job files and temporary meshes.
 
-Generated GLBs default to an `output` folder beside the running app executable.
-If the user chooses a different output folder, the app saves and reuses that
-path.
-
-When the user chooses setup, first-run preparation downloads/installs:
+First-run preparation downloads/installs:
 
 - Hunyuan source from `Tencent-Hunyuan/Hunyuan3D-2.1`.
 - PyTorch CUDA 12.4 wheels for Python 3.10-3.12.
-- Hunyuan Python dependencies needed for direct inference.
+- Curated Hunyuan inference dependencies.
 - Prebuilt Windows texture wheels from `visualbruno/ComfyUI-Hunyuan3d-2-1`.
 - Model weights from `tencent/Hunyuan3D-2.1`.
 - Texture conditioning from `facebook/dinov2-giant`.
 - `RealESRGAN_x4plus.pth` for texture enhancement.
 
-The app installs a curated inference set rather than the full upstream
-`requirements.txt`; demo/API/training packages such as Gradio, FastAPI, Blender
-Python, Cupy, and Deepspeed are skipped.
+The app intentionally skips full upstream demo/API/training dependencies such as
+Gradio, FastAPI, Blender Python, Cupy, and Deepspeed.
 
-ComfyUI is not required to run this app.
+### Build And Release
 
-## Current Scope
+Prerequisites:
 
-- Queue image files or folders.
-- Run Mesh + Texture, Mesh only, or Texture only.
-- Texture-only mode accepts an existing `.glb`, `.gltf`, `.obj`, or `.ply`.
-- Prepare an app-managed standalone runtime.
-- Detect Python, runtime source, model readiness, texture wheels, RealESRGAN,
-  NVIDIA GPU presence, and VRAM.
-- Preview input images and generated GLBs in the app.
-- Open the managed runtime folder and output folder.
-- Optional local Agent API for automation while the GUI is running.
-- Headless command runner for no-GUI generation.
+- Node.js 20.19+ or 22.12+
+- Rust toolchain for Tauri builds
+- Python 3.10, 3.11, or 3.12 available to the app
+- NVIDIA GPU drivers with `nvidia-smi`
 
-## Agent And Headless Control
+Install dependencies:
 
-The GUI has an `Agent API` checkbox in the Pipeline panel. When enabled, the app
-starts a local-only HTTP API at:
+```powershell
+npm install
+```
+
+Run the desktop app in development:
+
+```powershell
+npm run tauri:dev
+```
+
+Build and publish the standardized local release folders:
+
+```powershell
+npm run release:build
+```
+
+Release outputs:
+
+- `release\portable\image-to-hunyuan-3d.exe`
+- `release\installer\Image To Hunyuan 3D_26.6.13_x64-setup.exe`
+
+### Headless Runner
+
+Use the headless runner when the GUI should not be part of the automation flow:
+
+```powershell
+py -3 python\ih3d_headless.py --fast-preview D:\images\chair.png
+```
+
+Equivalent npm wrapper:
+
+```powershell
+npm run headless -- --fast-preview D:\images\chair.png
+```
+
+The runner uses the same managed runtime and model cache as the GUI. It streams
+JSON worker events to stdout.
+
+Useful flags:
+
+- `--fast-preview` uses faster mesh-only settings.
+- `--mode meshTexture` creates mesh and texture.
+- `--mode meshOnly` creates a faster mesh preview.
+- `--mode textureOnly --mesh-input-path D:\mesh\source.glb` textures an existing
+  mesh.
+- `--output-dir D:\models` chooses the output folder.
+- `--output-name chair-test` chooses the output basename.
+- `--overwrite` replaces an existing output with the same name.
+
+### Local Agent API
+
+The GUI exposes a local-only Agent API when the user enables `Agent API` in the
+Pipeline panel. The same API can be started on app launch by setting:
+
+```powershell
+$env:IH3D_AGENT_API = '1'
+.\release\portable\image-to-hunyuan-3d.exe
+```
+
+Base URL:
 
 ```text
 http://127.0.0.1:17333
 ```
 
-Useful endpoints:
+Endpoints:
 
 - `GET /health`
 - `GET /openapi.json`
+- `GET /status`
 - `GET /runtime`
 - `GET /vram`
 - `POST /prepare`
 - `POST /generate`
 - `POST /cancel`
 
-Example agent request:
+The `/generate` endpoint accepts the same important settings the UI exposes.
+Agents may send partial options; missing values are filled from app defaults.
+
+Mode values:
+
+- `meshTexture` - Mesh + Texture.
+- `meshOnly` - Mesh only.
+- `textureOnly` - Texture only.
+
+Common options:
+
+- `outputDir`
+- `outputName`
+- `meshInputPath`
+- `overwrite`
+- `meshSteps`
+- `meshGuidance`
+- `meshSeed`
+- `meshSeedMode`
+- `octreeResolution`
+- `numChunks`
+- `textureViewSize`
+- `textureSteps`
+- `textureGuidance`
+- `textureSize`
+- `textureSeed`
+- `textureSeedMode`
+
+Example fast mesh preview request:
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:17333/generate -ContentType 'application/json' -Body (@{
@@ -94,22 +191,47 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:17333/generate -ContentType
   options = @{
     mode = 'meshOnly'
     outputDir = 'D:\models'
+    outputName = 'chair-preview'
+    overwrite = $true
     meshSteps = 12
     octreeResolution = 256
+    numChunks = 6000
   }
 } | ConvertTo-Json -Depth 6)
 ```
 
-For no-GUI runs, use the headless runner:
+Example full mesh + texture request:
 
 ```powershell
-py -3 python\ih3d_headless.py --fast-preview D:\images\chair.png
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:17333/generate -ContentType 'application/json' -Body (@{
+  paths = @('D:\images\chair.png')
+  options = @{
+    mode = 'meshTexture'
+    outputDir = 'D:\models'
+    outputName = 'chair-textured'
+  }
+} | ConvertTo-Json -Depth 6)
 ```
 
-The headless runner uses the same app-managed runtime and model cache as the GUI.
-It streams JSON worker events to stdout for automation.
+### Git Hygiene
 
-## Important Texture Note
+Do not commit generated builds, local dependencies, app-managed Python
+environments, downloaded source archives, model weights, copied GLBs, job files,
+test output, or installer files.
+
+The `.gitignore` covers:
+
+- `node_modules`
+- `dist`
+- `release`
+- `src-tauri/target`
+- local Python caches
+- generated mesh/model files
+- app runtime/model/output folders
+- test input/output folders
+- installer files
+
+## Texture Note
 
 The supplied ComfyUI workflow, `Jun-2.1_TextureUpscaleWithAuraSR.json`, was used
 as a reference for the intended product flow: mesh, multiview texture, upscale,
@@ -120,82 +242,10 @@ for shape and PBR texture generation. AuraSR-specific parity is tracked as a
 follow-up because the standalone app should not depend on ComfyUI custom node
 loading.
 
-## Development
-
-Prerequisites:
-
-- Node.js 20.19+ or 22.12+
-- Rust toolchain for Tauri builds
-- Python 3.10, 3.11, or 3.12 available to the app
-- NVIDIA GPU drivers with `nvidia-smi`
-
-Install JavaScript dependencies:
-
-```powershell
-npm install
-```
-
-Run the frontend only:
-
-```powershell
-npm run dev
-```
-
-Run the desktop app:
-
-```powershell
-npm run tauri:dev
-```
-
-Run without the GUI:
-
-```powershell
-npm run headless -- --fast-preview D:\images\chair.png
-```
-
-Build release artifacts:
-
-```powershell
-npm run tauri:build
-```
-
-Publish the current build to the standardized public folders:
-
-```powershell
-npm run release:publish
-```
-
-Build and publish in one step:
-
-```powershell
-npm run release:build
-```
-
-Public release files are copied to:
-
-- `release\portable` - standalone executable.
-- `release\installer` - installer executable.
-
-## Git Hygiene
-
-Do not commit generated builds, local dependencies, app-managed Python
-environments, downloaded source archives, model weights, copied GLBs, job files,
-or installer files.
-
-The `.gitignore` covers:
-
-- `node_modules`
-- `dist`
-- `release`
-- `src-tauri/target`
-- local Python caches
-- generated mesh files
-- app runtime/model/output folders
-- installer files
-
 ## Roadmap
 
-- Run a small real Hunyuan job on the target NVIDIA machine.
+- Add explicit `/capabilities` and `/settings` endpoints for richer agent
+  discovery.
 - Add low-VRAM presets once they are validated.
 - Add richer texture controls where Tencent's direct API exposes them.
 - Add AuraSR-style optional view upscaling without requiring ComfyUI.
