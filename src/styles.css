@@ -233,6 +233,10 @@ select:disabled {
   accent-color: #ff8a1c;
 }
 
+.agent-port-field {
+  margin-top: 6px;
+}
+
 .agent-status {
   display: grid;
   gap: 2px;

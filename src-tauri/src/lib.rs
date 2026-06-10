@@ -33,7 +33,7 @@ const SOURCE_MARKER: &str = ".ih3d-source-v1-ready";
 const MODEL_MARKER: &str = ".ih3d-models-v1-ready";
 const WHEEL_MARKER: &str = ".ih3d-texture-wheels-v1-ready";
 const DEFAULT_PYTORCH_PROFILE: &str = "cu124";
-const AGENT_API_PORT: u16 = 17333;
+const DEFAULT_AGENT_API_PORT: u16 = 17333;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,6 +139,7 @@ struct AgentJobRequest {
 #[serde(rename_all = "camelCase")]
 struct AgentServerStatus {
     enabled: bool,
+    port: u16,
     url: String,
     openapi_url: String,
     busy: bool,
@@ -225,7 +226,18 @@ struct AgentServerState {
 #[derive(Default)]
 struct AgentServerControl {
     enabled: bool,
+    port: u16,
     stop: Option<Arc<AtomicBool>>,
+}
+
+impl AgentServerControl {
+    fn port(&self) -> u16 {
+        if self.port == 0 {
+            DEFAULT_AGENT_API_PORT
+        } else {
+            self.port
+        }
+    }
 }
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1014,24 +1026,35 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
-fn agent_api_url() -> String {
-    format!("http://127.0.0.1:{AGENT_API_PORT}")
+fn validate_agent_api_port(port: Option<u16>) -> Result<u16, String> {
+    let port = port.unwrap_or(DEFAULT_AGENT_API_PORT);
+    if port == 0 {
+        return Err("Agent API port must be between 1 and 65535.".to_string());
+    }
+    Ok(port)
+}
+
+fn agent_api_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}")
 }
 
 fn agent_status_from(
     agent_state: &AgentServerState,
     active_jobs: &ActiveJobState,
 ) -> Result<AgentServerStatus, String> {
-    let enabled = agent_state
-        .inner
-        .lock()
-        .map_err(|_| "Unable to lock agent server state.".to_string())?
-        .enabled;
+    let (enabled, port) = {
+        let control = agent_state
+            .inner
+            .lock()
+            .map_err(|_| "Unable to lock agent server state.".to_string())?;
+        (control.enabled, control.port())
+    };
     let active_job_id = active_jobs.active_job_id()?;
     Ok(AgentServerStatus {
         enabled,
-        url: agent_api_url(),
-        openapi_url: format!("{}/openapi.json", agent_api_url()),
+        port,
+        url: agent_api_url(port),
+        openapi_url: format!("{}/openapi.json", agent_api_url(port)),
         busy: active_job_id.is_some(),
         active_job_id,
         message: if enabled {
@@ -1132,14 +1155,14 @@ fn write_empty_response(stream: &mut TcpStream, status: &str) -> Result<(), Stri
         .map_err(|error| format!("Unable to write agent response: {error}"))
 }
 
-fn agent_openapi() -> serde_json::Value {
+fn agent_openapi(port: u16) -> serde_json::Value {
     serde_json::json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Image To Hunyuan 3D Agent API",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "servers": [{ "url": agent_api_url() }],
+        "servers": [{ "url": agent_api_url(port) }],
         "paths": {
             "/health": { "get": { "summary": "Check API status" } },
             "/status": { "get": { "summary": "Check active job status" } },
@@ -1199,9 +1222,9 @@ fn handle_agent_route(
             "ok": true,
             "service": "Image To Hunyuan 3D",
             "version": env!("CARGO_PKG_VERSION"),
-            "url": agent_api_url()
+            "url": agent_status_from(agent_state, active_jobs)?.url
         })),
-        ("GET", "/openapi.json") => Ok(agent_openapi()),
+        ("GET", "/openapi.json") => Ok(agent_openapi(agent_status_from(agent_state, active_jobs)?.port)),
         ("GET", "/status") => {
             let status = agent_status_from(agent_state, active_jobs)?;
             serde_json::to_value(status).map_err(|error| error.to_string())
@@ -1327,14 +1350,25 @@ fn set_agent_server_enabled_inner(
     agent_state: &AgentServerState,
     active_jobs: &ActiveJobState,
     enabled: bool,
+    port: Option<u16>,
 ) -> Result<AgentServerStatus, String> {
-    if enabled {
+    let port = validate_agent_api_port(port)?;
+    {
         let mut control = agent_state
             .inner
             .lock()
             .map_err(|_| "Unable to lock agent server state.".to_string())?;
-        if !control.enabled {
-            let listener = TcpListener::bind(("127.0.0.1", AGENT_API_PORT))
+
+        if control.enabled && (!enabled || control.port() != port) {
+            if let Some(stop) = control.stop.take() {
+                stop.store(true, Ordering::SeqCst);
+            }
+            control.enabled = false;
+        }
+        control.port = port;
+
+        if enabled && !control.enabled {
+            let listener = TcpListener::bind(("127.0.0.1", port))
                 .map_err(|error| format!("Unable to start Agent API: {error}"))?;
             let stop = Arc::new(AtomicBool::new(false));
             thread::spawn({
@@ -1347,15 +1381,6 @@ fn set_agent_server_enabled_inner(
             control.enabled = true;
             control.stop = Some(stop);
         }
-    } else {
-        let mut control = agent_state
-            .inner
-            .lock()
-            .map_err(|_| "Unable to lock agent server state.".to_string())?;
-        if let Some(stop) = control.stop.take() {
-            stop.store(true, Ordering::SeqCst);
-        }
-        control.enabled = false;
     }
 
     agent_status_from(agent_state, active_jobs)
@@ -1367,14 +1392,22 @@ fn set_agent_server_enabled(
     agent_state: State<'_, AgentServerState>,
     active_jobs: State<'_, ActiveJobState>,
     enabled: bool,
+    port: Option<u16>,
 ) -> Result<AgentServerStatus, String> {
-    set_agent_server_enabled_inner(app, agent_state.inner(), active_jobs.inner(), enabled)
+    set_agent_server_enabled_inner(app, agent_state.inner(), active_jobs.inner(), enabled, port)
 }
 
 fn agent_api_autostart_requested() -> bool {
     std::env::var("IH3D_AGENT_API")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
+}
+
+fn agent_api_autostart_port() -> Option<u16> {
+    std::env::var("IH3D_AGENT_API_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|port| *port > 0)
 }
 
 pub fn run() {
@@ -1388,9 +1421,13 @@ pub fn run() {
                 let handle = app.handle().clone();
                 let agent_state = app.state::<AgentServerState>().inner().clone();
                 let active_jobs = app.state::<ActiveJobState>().inner().clone();
-                if let Err(error) =
-                    set_agent_server_enabled_inner(handle, &agent_state, &active_jobs, true)
-                {
+                if let Err(error) = set_agent_server_enabled_inner(
+                    handle,
+                    &agent_state,
+                    &active_jobs,
+                    true,
+                    agent_api_autostart_port(),
+                ) {
                     eprintln!("Unable to start Agent API: {error}");
                 }
             }

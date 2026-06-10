@@ -166,7 +166,10 @@ $env:IH3D_AGENT_API = '1'
 .\release\portable\image-to-hunyuan-3d.exe
 ```
 
-Base URL:
+The default port is `17333`. Change it in the Pipeline panel, or set
+`IH3D_AGENT_API_PORT` when using environment auto-start.
+
+Default base URL:
 
 ```text
 http://127.0.0.1:17333
