@@ -29,6 +29,8 @@ def default_output_dir(root: Path) -> Path:
 def default_options(root: Path) -> dict[str, object]:
     return {
         "mode": "meshTexture",
+        "cudaDevice": "auto",
+        "runtimeProfile": "cu124",
         "outputDir": str(default_output_dir(root)),
         "outputName": "",
         "meshInputPath": "",
@@ -69,6 +71,13 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("inputs", nargs="*", help="Input image paths for generation.")
     parser.add_argument("--action", choices=["generate", "setup"], default="generate")
     parser.add_argument("--mode", choices=["meshTexture", "meshOnly", "textureOnly"], default=None)
+    parser.add_argument("--cuda-device", default=None, help="CUDA GPU index to use, or auto.")
+    parser.add_argument(
+        "--runtime-profile",
+        choices=["cu124", "cu128"],
+        default=None,
+        help="PyTorch CUDA runtime profile. cu128 is intended for RTX 50 / Blackwell GPUs.",
+    )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--output-name", default="")
     parser.add_argument("--mesh-input-path", default="")
@@ -99,6 +108,8 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
         )
     overrides = {
         "mode": args.mode,
+        "cudaDevice": args.cuda_device,
+        "runtimeProfile": args.runtime_profile,
         "outputDir": str(Path(args.output_dir).resolve()) if args.output_dir else None,
         "outputName": args.output_name,
         "meshInputPath": args.mesh_input_path,

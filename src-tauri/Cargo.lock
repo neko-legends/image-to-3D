@@ -1690,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "image-to-hunyuan-3d"
-version = "26.6.13"
+version = "26.6.14"
 dependencies = [
  "base64 0.22.1",
  "serde",

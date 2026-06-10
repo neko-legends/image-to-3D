@@ -52,6 +52,7 @@ struct RuntimeStatus {
     paint_model_ready: bool,
     texture_wheels_ready: bool,
     realesrgan_ready: bool,
+    env_runtime_profile: String,
     nvidia_gpu_found: bool,
     output_dir: String,
     jobs_dir: String,
@@ -60,7 +61,9 @@ struct RuntimeStatus {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GpuVram {
+    index: String,
     name: String,
+    compute_cap: String,
     memory_used_mb: u64,
     memory_total_mb: u64,
 }
@@ -77,6 +80,8 @@ struct VramStatus {
 #[serde(rename_all = "camelCase")]
 struct HunyuanOptions {
     mode: String,
+    cuda_device: String,
+    runtime_profile: String,
     output_dir: String,
     output_name: String,
     mesh_input_path: String,
@@ -272,9 +277,31 @@ fn output_dir(_app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+fn env_runtime_profile(env: &Path) -> String {
+    let marker = env.join(ENV_MARKER);
+    let Ok(content) = fs::read_to_string(marker) else {
+        return "not installed".to_string();
+    };
+    let trimmed = content.trim();
+    if trimmed == "ok" {
+        return "cu124".to_string();
+    }
+    for line in trimmed.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "pytorch" {
+            return value.trim().to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
 fn default_hunyuan_options() -> HunyuanOptions {
     HunyuanOptions {
         mode: "meshTexture".to_string(),
+        cuda_device: "auto".to_string(),
+        runtime_profile: "cu124".to_string(),
         output_dir: String::new(),
         output_name: String::new(),
         mesh_input_path: String::new(),
@@ -576,6 +603,16 @@ fn runtime_ready_for_generation(app: &AppHandle, options: &HunyuanOptions) -> Re
     if !env_python.is_file() || !env.join(ENV_MARKER).is_file() {
         return Err("Setup is needed before generation. Choose Set up now first.".to_string());
     }
+    let installed_profile = env_runtime_profile(&env);
+    let requested_profile = options.runtime_profile.trim();
+    if !requested_profile.is_empty()
+        && installed_profile != "unknown"
+        && installed_profile != requested_profile
+    {
+        return Err(format!(
+            "The app runtime is installed for {installed_profile}, but this job is set to {requested_profile}. Choose Prepare to reinstall the Python runtime for the selected PyTorch profile."
+        ));
+    }
     if !source.join(SOURCE_MARKER).is_file() {
         return Err(
             "Hunyuan source setup is not finished yet. Choose Set up now first.".to_string(),
@@ -633,6 +670,7 @@ fn check_runtime(app: AppHandle) -> Result<RuntimeStatus, String> {
             .join("ckpt")
             .join("RealESRGAN_x4plus.pth")
             .is_file(),
+        env_runtime_profile: env_runtime_profile(&env),
         nvidia_gpu_found: nvidia_smi_available(),
         output_dir: outputs.display().to_string(),
         jobs_dir: jobs.display().to_string(),
@@ -643,7 +681,7 @@ fn check_runtime(app: AppHandle) -> Result<RuntimeStatus, String> {
 fn get_vram_status() -> VramStatus {
     let mut command = Command::new("nvidia-smi");
     command.args([
-        "--query-gpu=name,memory.used,memory.total",
+        "--query-gpu=index,name,compute_cap,memory.used,memory.total",
         "--format=csv,noheader,nounits",
     ]);
     hide_command_window(&mut command);
@@ -671,13 +709,15 @@ fn get_vram_status() -> VramStatus {
         .lines()
         .filter_map(|line| {
             let parts: Vec<_> = line.split(',').map(str::trim).collect();
-            if parts.len() < 3 {
+            if parts.len() < 5 {
                 return None;
             }
             Some(GpuVram {
-                name: parts[0].to_string(),
-                memory_used_mb: parts[1].parse().ok()?,
-                memory_total_mb: parts[2].parse().ok()?,
+                index: parts[0].to_string(),
+                name: parts[1].to_string(),
+                compute_cap: parts[2].to_string(),
+                memory_used_mb: parts[3].parse().ok()?,
+                memory_total_mb: parts[4].parse().ok()?,
             })
         })
         .collect::<Vec<_>>();
@@ -923,6 +963,22 @@ fn cancel_active_job(active_jobs: State<'_, ActiveJobState>) -> Result<(), Strin
     kill_process_tree(pid)
 }
 
+#[tauri::command]
+fn reset_python_runtime(
+    app: AppHandle,
+    active_jobs: State<'_, ActiveJobState>,
+) -> Result<RuntimeStatus, String> {
+    if active_jobs.is_busy()? {
+        return Err("Wait for the current job to finish before resetting the runtime.".to_string());
+    }
+    let env = env_dir(&app)?;
+    if env.exists() {
+        fs::remove_dir_all(&env)
+            .map_err(|error| format!("Unable to reset Python runtime: {error}"))?;
+    }
+    check_runtime(app)
+}
+
 struct HttpRequest {
     method: String,
     path: String,
@@ -1061,6 +1117,7 @@ fn agent_openapi() -> serde_json::Value {
             "/runtime": { "get": { "summary": "Check local runtime readiness" } },
             "/vram": { "get": { "summary": "Check NVIDIA VRAM" } },
             "/prepare": { "post": { "summary": "Prepare the standalone runtime" } },
+            "/reset-runtime": { "post": { "summary": "Reset the managed Python runtime" } },
             "/generate": { "post": { "summary": "Start a Hunyuan generation job" } },
             "/cancel": { "post": { "summary": "Cancel the active job" } }
         }
@@ -1151,6 +1208,19 @@ fn handle_agent_route(
                 options,
             )?;
             Ok(serde_json::json!({ "ok": true, "jobId": job_id }))
+        }
+        ("POST", "/reset-runtime") => {
+            if active_jobs.is_busy()? {
+                return Err(
+                    "Wait for the current job to finish before resetting the runtime.".to_string(),
+                );
+            }
+            let env = env_dir(app)?;
+            if env.exists() {
+                fs::remove_dir_all(&env)
+                    .map_err(|error| format!("Unable to reset Python runtime: {error}"))?;
+            }
+            Ok(serde_json::json!({ "ok": true }))
         }
         ("POST", "/cancel") => {
             let pid = active_jobs.request_cancel()?;
@@ -1306,6 +1376,7 @@ pub fn run() {
             open_runtime_folder,
             prepare_runtime,
             preview_image_data_url,
+            reset_python_runtime,
             resolve_inputs,
             set_agent_server_enabled,
             start_hunyuan_job

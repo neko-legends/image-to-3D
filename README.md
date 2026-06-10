@@ -27,13 +27,23 @@ Use the app like a normal desktop tool.
 
 3. Add an image or a folder of images.
 
-4. Choose a mode:
+4. Pick the CUDA GPU and PyTorch runtime in the Runtime panel if you have more
+   than one NVIDIA GPU.
+
+   - `CUDA 12.4 / stable` is the default and is known to work on cards like the
+     RTX 3090.
+   - `CUDA 12.8 / RTX 50 Blackwell` is intended for RTX 50-series cards such as
+     the RTX 5090.
+   - `Auto choose compatible GPU` uses the best compatible card for the
+     installed runtime.
+
+5. Choose a mode:
 
    - `Mesh + Texture` creates a textured GLB.
    - `Mesh only` creates a faster mesh preview GLB.
    - `Texture only` textures an existing `.glb`, `.gltf`, `.obj`, or `.ply`.
 
-5. Generated GLBs go into an `output` folder beside the running app by default.
+6. Generated GLBs go into an `output` folder beside the running app by default.
    If you choose a different output folder, the app remembers it.
 
 ComfyUI is not required. The app manages its own Python runtime, Hunyuan source,
@@ -58,7 +68,7 @@ Managed app data contains:
 First-run preparation downloads/installs:
 
 - Hunyuan source from `Tencent-Hunyuan/Hunyuan3D-2.1`.
-- PyTorch CUDA 12.4 wheels for Python 3.10-3.12.
+- PyTorch CUDA wheels for Python 3.10-3.12.
 - Curated Hunyuan inference dependencies.
 - Prebuilt Windows texture wheels from `visualbruno/ComfyUI-Hunyuan3d-2-1`.
 - Model weights from `tencent/Hunyuan3D-2.1`.
@@ -67,6 +77,18 @@ First-run preparation downloads/installs:
 
 The app intentionally skips full upstream demo/API/training dependencies such as
 Gradio, FastAPI, Blender Python, Cupy, and Deepspeed.
+
+Runtime profiles:
+
+- `cu124` installs `torch==2.5.1+cu124`, `torchvision==0.20.1+cu124`,
+  `torchaudio==2.5.1+cu124`. This is the known-good default for RTX 30/40-series
+  cards and falls back to compatible GPUs when a newer card is not supported.
+- `cu128` installs `torch==2.7.1+cu128`, `torchvision==0.22.1+cu128`,
+  `torchaudio==2.7.1+cu128`. This is intended for RTX 50 / Blackwell GPUs.
+
+Changing the runtime profile and choosing `Prepare` recreates the managed
+Python environment for that profile. The `Reset Env` button removes only the
+managed Python environment; models stay downloaded.
 
 ### Build And Release
 
@@ -120,6 +142,8 @@ JSON worker events to stdout.
 Useful flags:
 
 - `--fast-preview` uses faster mesh-only settings.
+- `--cuda-device 1` selects a specific NVIDIA GPU index.
+- `--runtime-profile cu128` installs/uses the CUDA 12.8 RTX 50-series profile.
 - `--mode meshTexture` creates mesh and texture.
 - `--mode meshOnly` creates a faster mesh preview.
 - `--mode textureOnly --mesh-input-path D:\mesh\source.glb` textures an existing
@@ -152,6 +176,7 @@ Endpoints:
 - `GET /runtime`
 - `GET /vram`
 - `POST /prepare`
+- `POST /reset-runtime`
 - `POST /generate`
 - `POST /cancel`
 
@@ -166,6 +191,8 @@ Mode values:
 
 Common options:
 
+- `cudaDevice`
+- `runtimeProfile`
 - `outputDir`
 - `outputName`
 - `meshInputPath`
@@ -190,6 +217,8 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:17333/generate -ContentType
   paths = @('D:\images\chair.png')
   options = @{
     mode = 'meshOnly'
+    cudaDevice = 'auto'
+    runtimeProfile = 'cu124'
     outputDir = 'D:\models'
     outputName = 'chair-preview'
     overwrite = $true
@@ -207,6 +236,8 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:17333/generate -ContentType
   paths = @('D:\images\chair.png')
   options = @{
     mode = 'meshTexture'
+    cudaDevice = '0'
+    runtimeProfile = 'cu128'
     outputDir = 'D:\models'
     outputName = 'chair-textured'
   }

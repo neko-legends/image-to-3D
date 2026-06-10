@@ -18,6 +18,7 @@ import {
   RotateCcw,
   Settings2,
   Square,
+  Trash2,
   TriangleAlert,
   WandSparkles,
   XCircle
@@ -45,13 +46,16 @@ type RuntimeStatus = {
   paintModelReady: boolean;
   textureWheelsReady: boolean;
   realesrganReady: boolean;
+  envRuntimeProfile: string;
   nvidiaGpuFound: boolean;
   outputDir: string;
   jobsDir: string;
 };
 
 type GpuVram = {
+  index: string;
   name: string;
+  computeCap: string;
   memoryUsedMb: number;
   memoryTotalMb: number;
 };
@@ -73,6 +77,8 @@ type AgentServerStatus = {
 
 type HunyuanOptions = {
   mode: PipelineMode;
+  cudaDevice: string;
+  runtimeProfile: string;
   outputDir: string;
   outputName: string;
   meshInputPath: string;
@@ -147,12 +153,14 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.6.13";
+const APP_VERSION = "v26.6.14";
 const SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
 const AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
 
 const defaultOptions: HunyuanOptions = {
   mode: "meshTexture",
+  cudaDevice: "auto",
+  runtimeProfile: "cu124",
   outputDir: "",
   outputName: "",
   meshInputPath: "",
@@ -212,6 +220,10 @@ function coerceMode(value: unknown, fallback: PipelineMode): PipelineMode {
     : fallback;
 }
 
+function coerceRuntimeProfile(value: unknown, fallback: string) {
+  return value === "cu124" || value === "cu128" ? value : fallback;
+}
+
 function coerceSeedMode(value: unknown, fallback: SeedMode): SeedMode {
   return value === "fixed" || value === "randomize" ? value : fallback;
 }
@@ -224,6 +236,8 @@ function loadSavedOptions(): HunyuanOptions {
     const parsed = JSON.parse(saved) as Partial<HunyuanOptions>;
     return {
       mode: coerceMode(parsed.mode, defaultOptions.mode),
+      cudaDevice: coerceString(parsed.cudaDevice, defaultOptions.cudaDevice),
+      runtimeProfile: coerceRuntimeProfile(parsed.runtimeProfile, defaultOptions.runtimeProfile),
       outputDir: coerceString(parsed.outputDir, defaultOptions.outputDir),
       outputName: coerceString(parsed.outputName, defaultOptions.outputName),
       meshInputPath: coerceString(parsed.meshInputPath, defaultOptions.meshInputPath),
@@ -276,6 +290,16 @@ function formatVram(vram: VramStatus | null) {
   };
 }
 
+function gpuOptionLabel(gpu: GpuVram) {
+  return `${gpu.index}: ${gpu.name} sm_${gpu.computeCap.replace(".", "")}`;
+}
+
+function runtimeProfileLabel(profile: string) {
+  if (profile === "cu128") return "CUDA 12.8 / RTX 50";
+  if (profile === "cu124") return "CUDA 12.4 / stable";
+  return profile || "not installed";
+}
+
 function statusIcon(status: QueueStatus) {
   if (status === "done") return <CheckCircle2 size={18} />;
   if (status === "error" || status === "canceled") return <XCircle size={18} />;
@@ -293,12 +317,13 @@ function parseOutputPaths(output?: string, outputs?: string[]) {
   );
 }
 
-function runtimeReady(runtime: RuntimeStatus | null) {
-  return Boolean(runtime?.envReady && runtime.sourceReady && runtime.modelsReady);
+function runtimeReady(runtime: RuntimeStatus | null, options?: HunyuanOptions) {
+  const profileReady = !options || runtime?.envRuntimeProfile === options.runtimeProfile;
+  return Boolean(runtime?.envReady && runtime.sourceReady && runtime.modelsReady && profileReady);
 }
 
-function runtimeNeedsSetup(runtime: RuntimeStatus | null) {
-  return Boolean(runtime && !runtimeReady(runtime));
+function runtimeNeedsSetup(runtime: RuntimeStatus | null, options?: HunyuanOptions) {
+  return Boolean(runtime && !runtimeReady(runtime, options));
 }
 
 function formatBytes(value?: number | null) {
@@ -494,10 +519,10 @@ function App() {
   }, [agentControlEnabled, pushLog]);
 
   useEffect(() => {
-    if (!runtimeNeedsSetup(runtime) || busy || setupPromptSeenRef.current) return;
+    if (!runtimeNeedsSetup(runtime, options) || busy || setupPromptSeenRef.current) return;
     setupPromptSeenRef.current = true;
     setShowSetupPrompt(true);
-  }, [busy, runtime]);
+  }, [busy, options, runtime]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -638,6 +663,22 @@ function App() {
     }
   }, []);
 
+  const resetPythonRuntime = useCallback(async () => {
+    if (!isTauriRuntime() || busy) return;
+    const confirmed = window.confirm(
+      "Reset the app Python environment? Models stay downloaded. The next Prepare will reinstall dependencies for the selected PyTorch runtime."
+    );
+    if (!confirmed) return;
+    try {
+      const status = await invoke<RuntimeStatus>("reset_python_runtime");
+      setRuntime(status);
+      pushLog("Python runtime reset. Choose Prepare to reinstall.");
+      setHeadline("Python runtime reset");
+    } catch (error) {
+      pushLog(String(error));
+    }
+  }, [busy, pushLog]);
+
   const chooseMeshInput = useCallback(async () => {
     const selected = await openDialog({
       multiple: false,
@@ -674,7 +715,7 @@ function App() {
 
   const start = useCallback(async () => {
     if (!canStart || !isTauriRuntime()) return;
-    if (!runtimeReady(runtime)) {
+    if (!runtimeReady(runtime, options)) {
       setShowSetupPrompt(true);
       pushLog("Setup is required before generation.");
       return;
@@ -683,7 +724,7 @@ function App() {
     setCanceling(false);
     activeActionRef.current = "generate";
     setQueue((current) => current.map((item) => ({ ...item, status: "pending", message: undefined })));
-    setHeadline(runtimeReady(runtime) ? "Starting Hunyuan job" : "Preparing runtime first");
+    setHeadline(runtimeReady(runtime, options) ? "Starting Hunyuan job" : "Preparing runtime first");
     try {
       const jobOptions = {
         ...options,
@@ -1217,9 +1258,42 @@ function App() {
                   <RefreshCw size={14} />
                 </button>
               </div>
+              <div className="runtime-controls">
+                <label className="field">
+                  <span>CUDA GPU</span>
+                  <select
+                    value={options.cudaDevice}
+                    disabled={busy}
+                    onChange={(event) => setOptions((current) => ({ ...current, cudaDevice: event.target.value }))}
+                  >
+                    <option value="auto">Auto choose compatible GPU</option>
+                    {vram?.gpus.map((gpu) => (
+                      <option key={gpu.index} value={gpu.index}>
+                        {gpuOptionLabel(gpu)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>PyTorch runtime</span>
+                  <select
+                    value={options.runtimeProfile}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setOptions((current) => ({ ...current, runtimeProfile: event.target.value }))
+                    }
+                  >
+                    <option value="cu124">CUDA 12.4 / stable 30-40 series</option>
+                    <option value="cu128">CUDA 12.8 / RTX 50 Blackwell</option>
+                  </select>
+                </label>
+              </div>
               <div className="runtime-status">
                 <p className={runtime?.nvidiaGpuFound ? "ok" : "warn"}>
                   NVIDIA: {runtime?.nvidiaGpuFound ? "detected" : "not detected"}
+                </p>
+                <p className={runtime?.envRuntimeProfile === options.runtimeProfile ? "ok" : "warn"}>
+                  PyTorch: {runtimeProfileLabel(runtime?.envRuntimeProfile ?? "not installed")}
                 </p>
                 <p className={runtime?.pythonFound ? "ok" : "warn"}>
                   Python: {runtime?.pythonCommand ?? "missing"}
@@ -1257,6 +1331,14 @@ function App() {
                 <PackageOpen size={16} />
                 Outputs
               </button>
+              <button
+                className="secondary runtime-button"
+                disabled={busy}
+                onClick={() => void resetPythonRuntime()}
+              >
+                <Trash2 size={16} />
+                Reset Env
+              </button>
             </div>
           </section>
 
@@ -1279,6 +1361,36 @@ function App() {
                 Before it can generate 3D models, the app needs to create its own local runtime and download the
                 Hunyuan3D model files. Nothing starts downloading until you choose setup.
               </p>
+              <div className="setup-runtime-options">
+                <label className="field">
+                  <span>CUDA GPU</span>
+                  <select
+                    value={options.cudaDevice}
+                    disabled={busy}
+                    onChange={(event) => setOptions((current) => ({ ...current, cudaDevice: event.target.value }))}
+                  >
+                    <option value="auto">Auto choose compatible GPU</option>
+                    {vram?.gpus.map((gpu) => (
+                      <option key={gpu.index} value={gpu.index}>
+                        {gpuOptionLabel(gpu)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>PyTorch runtime</span>
+                  <select
+                    value={options.runtimeProfile}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setOptions((current) => ({ ...current, runtimeProfile: event.target.value }))
+                    }
+                  >
+                    <option value="cu124">CUDA 12.4 / stable 30-40 series</option>
+                    <option value="cu128">CUDA 12.8 / RTX 50 Blackwell</option>
+                  </select>
+                </label>
+              </div>
               <div className="setup-checks">
                 <span className={runtime?.pythonFound ? "ok" : "warn"}>
                   Python: {runtime?.pythonFound ? "ready" : "needed"}

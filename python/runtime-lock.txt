@@ -8,8 +8,12 @@
 #
 # First-run runtime plan:
 # - Python: 3.10, 3.11, or 3.12
-# - PyTorch CUDA: torch==2.5.1+cu124, torchvision==0.20.1+cu124,
+# - Default PyTorch CUDA profile: cu124
+#   torch==2.5.1+cu124, torchvision==0.20.1+cu124,
 #   torchaudio==2.5.1+cu124
+# - Optional RTX 50 / Blackwell profile: cu128
+#   torch==2.7.1+cu128, torchvision==0.22.1+cu128,
+#   torchaudio==2.7.1+cu128
 # - Hunyuan source: https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1
 # - Texture Windows wheels: https://github.com/visualbruno/ComfyUI-Hunyuan3d-2-1
 # - Model weights: tencent/Hunyuan3D-2.1

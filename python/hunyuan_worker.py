@@ -46,13 +46,28 @@ ENV_MARKER = ".ih3d-env-v3-ready"
 SOURCE_MARKER = ".ih3d-source-v1-ready"
 MODEL_MARKER = ".ih3d-models-v1-ready"
 WHEEL_MARKER = ".ih3d-texture-wheels-v1-ready"
-PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu124"
 BOOTSTRAP_PACKAGES = ["pip>=24.3", "setuptools>=70.0", "wheel>=0.43"]
-PYTORCH_CUDA_PACKAGES = [
-    "torch==2.5.1+cu124",
-    "torchvision==0.20.1+cu124",
-    "torchaudio==2.5.1+cu124",
-]
+DEFAULT_PYTORCH_PROFILE = "cu124"
+PYTORCH_RUNTIME_PROFILES = {
+    "cu124": {
+        "label": "PyTorch CUDA 12.4",
+        "index_url": "https://download.pytorch.org/whl/cu124",
+        "packages": [
+            "torch==2.5.1+cu124",
+            "torchvision==0.20.1+cu124",
+            "torchaudio==2.5.1+cu124",
+        ],
+    },
+    "cu128": {
+        "label": "PyTorch CUDA 12.8",
+        "index_url": "https://download.pytorch.org/whl/cu128",
+        "packages": [
+            "torch==2.7.1+cu128",
+            "torchvision==0.22.1+cu128",
+            "torchaudio==2.7.1+cu128",
+        ],
+    },
+}
 COMPAT_PACKAGES = [
     "numpy==1.26.4",
     "requests>=2.32.0",
@@ -231,10 +246,34 @@ def cuda_cap_is_supported(device_cap: tuple[int, int], supported_caps: list[tupl
     return any(major == device_major and minor <= device_minor for major, minor in supported_caps)
 
 
-def configure_cuda_device() -> None:
-    if os.environ.get("CUDA_VISIBLE_DEVICES"):
-        emit("setup", f"Using CUDA device override: {os.environ['CUDA_VISIBLE_DEVICES']}")
-        return
+def normalize_pytorch_profile(value: Any) -> str:
+    profile = str(value or DEFAULT_PYTORCH_PROFILE).strip()
+    return profile if profile in PYTORCH_RUNTIME_PROFILES else DEFAULT_PYTORCH_PROFILE
+
+
+def normalize_cuda_device(value: Any) -> str:
+    device = str(value or "auto").strip()
+    return device if device else "auto"
+
+
+def env_marker_profile(marker: Path) -> str | None:
+    if not marker.exists():
+        return None
+    try:
+        text = marker.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    if text == "ok":
+        return "cu124"
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "pytorch":
+            return normalize_pytorch_profile(value)
+    return None
+
+
+def configure_cuda_device(cuda_device: Any = "auto") -> None:
+    preferred_device = normalize_cuda_device(cuda_device)
 
     gpus = nvidia_gpus()
     if not gpus:
@@ -242,6 +281,27 @@ def configure_cuda_device() -> None:
 
     supported_caps = torch_supported_cuda_caps()
     if not supported_caps:
+        return
+
+    if preferred_device != "auto":
+        selected = next((gpu for gpu in gpus if gpu["index"] == preferred_device), None)
+        if selected is None:
+            detected = ", ".join(f"{gpu['index']}: {gpu['name']}" for gpu in gpus)
+            raise RuntimeError(f"Selected CUDA GPU {preferred_device} was not found. Detected GPUs: {detected}.")
+        if not cuda_cap_is_supported(selected["capability"], supported_caps):
+            supported = ", ".join(cap_label(cap) for cap in supported_caps)
+            raise RuntimeError(
+                f"Selected GPU {selected['name']} {cap_label(selected['capability'])} is not supported by this "
+                f"PyTorch runtime. Supported by this runtime: {supported}. Choose another GPU or reinstall with "
+                "the CUDA 12.8 / RTX 50 runtime profile."
+            )
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        os.environ["CUDA_VISIBLE_DEVICES"] = selected["index"]
+        emit("setup", f"Using selected CUDA GPU {selected['index']}: {selected['name']}")
+        return
+
+    if os.environ.get("CUDA_VISIBLE_DEVICES"):
+        emit("setup", f"Using CUDA device override: {os.environ['CUDA_VISIBLE_DEVICES']}")
         return
 
     default_gpu = gpus[0]
@@ -557,12 +617,22 @@ def install_texture_wheels(python_path: Path, paths: dict[str, Path]) -> None:
     marker.write_text("ok\n", encoding="utf-8")
 
 
-def ensure_env(paths: dict[str, Path], source_dir: Path) -> Path:
+def ensure_env(paths: dict[str, Path], source_dir: Path, pytorch_profile: str) -> Path:
     env_dir = paths["env_dir"]
     python_path = venv_python(env_dir)
+    marker = env_dir / ENV_MARKER
     if python_path.exists() and not supported_python_version(python_version(python_path)):
         emit("setup", "Recreating app Python environment with a supported Python version")
         shutil.rmtree(env_dir, ignore_errors=True)
+        python_path = venv_python(env_dir)
+
+    installed_profile = env_marker_profile(marker)
+    if python_path.exists() and marker.exists() and installed_profile != pytorch_profile:
+        old_label = PYTORCH_RUNTIME_PROFILES.get(installed_profile or "", {}).get("label", "unknown PyTorch runtime")
+        new_label = PYTORCH_RUNTIME_PROFILES[pytorch_profile]["label"]
+        emit("setup", f"Recreating app Python environment: {old_label} -> {new_label}")
+        shutil.rmtree(env_dir, ignore_errors=True)
+        python_path = venv_python(env_dir)
 
     if not python_path.exists():
         emit("setup", f"Creating app Python environment: {env_dir}")
@@ -571,15 +641,15 @@ def ensure_env(paths: dict[str, Path], source_dir: Path) -> Path:
     if not supported_python_version(python_version(python_path)):
         raise RuntimeError("Image To Hunyuan 3D requires Python 3.10, 3.11, or 3.12.")
 
-    marker = env_dir / ENV_MARKER
     if marker.exists():
         return python_path
 
+    profile = PYTORCH_RUNTIME_PROFILES[pytorch_profile]
     pip = [str(python_path), "-m", "pip"]
     run_checked(pip + ["install", "--upgrade", *BOOTSTRAP_PACKAGES], "Updating pip")
     run_checked(
-        pip + ["install", "--upgrade", *PYTORCH_CUDA_PACKAGES, "--index-url", PYTORCH_CUDA_INDEX_URL],
-        "Installing NVIDIA PyTorch runtime",
+        pip + ["install", "--upgrade", *profile["packages"], "--index-url", str(profile["index_url"])],
+        f"Installing NVIDIA {profile['label']} runtime",
     )
     run_checked(pip + ["install", "--upgrade", *COMPAT_PACKAGES], "Installing shared runtime packages")
     run_checked(
@@ -588,17 +658,17 @@ def ensure_env(paths: dict[str, Path], source_dir: Path) -> Path:
     )
     run_checked(pip + ["install", "--upgrade", "numpy==1.26.4"], "Pinning compatible NumPy")
     install_texture_wheels(python_path, paths)
-    marker.write_text("ok\n", encoding="utf-8")
+    marker.write_text(f"pytorch={pytorch_profile}\n", encoding="utf-8")
     return python_path
 
 
-def prepare_managed_environment(app_data_dir: Path) -> tuple[Path, dict[str, Path]]:
+def prepare_managed_environment(app_data_dir: Path, pytorch_profile: str) -> tuple[Path, dict[str, Path]]:
     paths = app_paths(app_data_dir)
     for key in ("runtime_dir", "model_dir", "output_dir", "jobs_dir"):
         paths[key].mkdir(parents=True, exist_ok=True)
     source_dir = ensure_source(paths)
     patch_hunyuan_source(source_dir)
-    python_path = ensure_env(paths, source_dir)
+    python_path = ensure_env(paths, source_dir, pytorch_profile)
     return python_path, paths
 
 
@@ -921,8 +991,9 @@ def run_managed_job(job: dict[str, Any]) -> None:
         paths[key].mkdir(parents=True, exist_ok=True)
 
     action = str(job.get("action", "generate"))
-    include_texture = action == "setup" or str(job.get("options", {}).get("mode", "meshTexture")) != "meshOnly"
-    configure_cuda_device()
+    options = job.get("options", {})
+    include_texture = action == "setup" or str(options.get("mode", "meshTexture")) != "meshOnly"
+    configure_cuda_device(options.get("cudaDevice", "auto"))
     ensure_models(paths, include_texture=include_texture)
 
     if action == "setup":
@@ -937,7 +1008,8 @@ def run_outer(job_path: Path) -> int:
     with job_path.open("r", encoding="utf-8") as handle:
         job = json.load(handle)
     app_data_dir = Path(job["app_data_dir"])
-    python_path, paths = prepare_managed_environment(app_data_dir)
+    pytorch_profile = normalize_pytorch_profile(job.get("options", {}).get("runtimeProfile"))
+    python_path, paths = prepare_managed_environment(app_data_dir, pytorch_profile)
     return reinvoke_inside_env(python_path, job_path, app_data_dir, paths)
 
 

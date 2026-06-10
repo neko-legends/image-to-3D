@@ -1,6 +1,6 @@
 [package]
 name = "image-to-hunyuan-3d"
-version = "26.6.13"
+version = "26.6.14"
 description = "Local Image to Hunyuan 3D workflow app"
 authors = ["Image To Hunyuan 3D contributors"]
 license = "MIT"
