@@ -153,7 +153,7 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.6.16";
+const APP_VERSION = "v26.6.17";
 const SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
 const AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
 
@@ -427,10 +427,10 @@ function App() {
 
   const refreshRuntime = useCallback(async () => {
     if (!isTauriRuntime()) return;
-    const status = await invoke<RuntimeStatus>("check_runtime");
+    const status = await invoke<RuntimeStatus>("check_runtime", { runtimeProfile: options.runtimeProfile });
     setRuntime(status);
     return status;
-  }, []);
+  }, [options.runtimeProfile]);
 
   const refreshVram = useCallback(async () => {
     if (!isTauriRuntime()) return;
@@ -683,18 +683,18 @@ function App() {
   const resetPythonRuntime = useCallback(async () => {
     if (!isTauriRuntime() || busy) return;
     const confirmed = window.confirm(
-      "Reset the app Python environment? Models stay downloaded. The next Prepare will reinstall dependencies for the selected PyTorch runtime."
+      "Reset the selected Python runtime? Models and outputs stay untouched. The next Prepare will reinstall dependencies for the selected PyTorch runtime."
     );
     if (!confirmed) return;
     try {
-      const status = await invoke<RuntimeStatus>("reset_python_runtime");
+      const status = await invoke<RuntimeStatus>("reset_python_runtime", { runtimeProfile: options.runtimeProfile });
       setRuntime(status);
-      pushLog("Python runtime reset. Choose Prepare to reinstall.");
+      pushLog(`${runtimeProfileLabel(options.runtimeProfile)} runtime reset. Choose Prepare to reinstall it.`);
       setHeadline("Python runtime reset");
     } catch (error) {
       pushLog(String(error));
     }
-  }, [busy, pushLog]);
+  }, [busy, options.runtimeProfile, pushLog]);
 
   const chooseMeshInput = useCallback(async () => {
     const selected = await openDialog({

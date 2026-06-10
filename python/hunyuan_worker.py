@@ -108,6 +108,40 @@ MESH_EXTENSIONS = {".glb", ".gltf", ".obj", ".ply"}
 PYTHON_VERSION_RE = re.compile(r"Python\s+(\d+)\.(\d+)\.(\d+)")
 
 
+def normalize_pytorch_profile(value: Any) -> str:
+    profile = str(value or DEFAULT_PYTORCH_PROFILE).strip()
+    return profile if profile in PYTORCH_RUNTIME_PROFILES else DEFAULT_PYTORCH_PROFILE
+
+
+def env_marker_profile(marker: Path) -> str | None:
+    if not marker.exists():
+        return None
+    try:
+        text = marker.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    if text == "ok":
+        return "cu124"
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "pytorch":
+            return normalize_pytorch_profile(value)
+    return None
+
+
+def env_dir_for_profile(app_data_dir: Path, pytorch_profile: Any = None) -> Path:
+    profile = normalize_pytorch_profile(pytorch_profile)
+    profiled_env = app_data_dir / f"python-env-{profile}"
+    if profiled_env.exists():
+        return profiled_env
+
+    legacy_env = app_data_dir / "python-env"
+    if legacy_env.exists() and env_marker_profile(legacy_env / ENV_MARKER) == profile:
+        return legacy_env
+
+    return profiled_env
+
+
 def emit(event_type: str, message: str | None = None, **payload: Any) -> None:
     event: dict[str, Any] = {"type": event_type}
     if message:
@@ -116,11 +150,11 @@ def emit(event_type: str, message: str | None = None, **payload: Any) -> None:
     print(json.dumps(event, ensure_ascii=True), flush=True)
 
 
-def app_paths(app_data_dir: Path) -> dict[str, Path]:
+def app_paths(app_data_dir: Path, pytorch_profile: Any = None) -> dict[str, Path]:
     runtime_dir = app_data_dir / "runtime"
     return {
         "app_data": app_data_dir,
-        "env_dir": app_data_dir / "python-env",
+        "env_dir": env_dir_for_profile(app_data_dir, pytorch_profile),
         "runtime_dir": runtime_dir,
         "source_dir": runtime_dir / "Hunyuan3D-2.1",
         "wheel_source_dir": runtime_dir / "ComfyUI-Hunyuan3d-2-1-wheels",
@@ -246,30 +280,9 @@ def cuda_cap_is_supported(device_cap: tuple[int, int], supported_caps: list[tupl
     return any(major == device_major and minor <= device_minor for major, minor in supported_caps)
 
 
-def normalize_pytorch_profile(value: Any) -> str:
-    profile = str(value or DEFAULT_PYTORCH_PROFILE).strip()
-    return profile if profile in PYTORCH_RUNTIME_PROFILES else DEFAULT_PYTORCH_PROFILE
-
-
 def normalize_cuda_device(value: Any) -> str:
     device = str(value or "auto").strip()
     return device if device else "auto"
-
-
-def env_marker_profile(marker: Path) -> str | None:
-    if not marker.exists():
-        return None
-    try:
-        text = marker.read_text(encoding="utf-8").strip()
-    except Exception:
-        return None
-    if text == "ok":
-        return "cu124"
-    for line in text.splitlines():
-        key, _, value = line.partition("=")
-        if key.strip() == "pytorch":
-            return normalize_pytorch_profile(value)
-    return None
 
 
 def configure_cuda_device(cuda_device: Any = "auto") -> None:
@@ -663,7 +676,7 @@ def ensure_env(paths: dict[str, Path], source_dir: Path, pytorch_profile: str) -
 
 
 def prepare_managed_environment(app_data_dir: Path, pytorch_profile: str) -> tuple[Path, dict[str, Path]]:
-    paths = app_paths(app_data_dir)
+    paths = app_paths(app_data_dir, pytorch_profile)
     for key in ("runtime_dir", "model_dir", "output_dir", "jobs_dir"):
         paths[key].mkdir(parents=True, exist_ok=True)
     source_dir = ensure_source(paths)
@@ -1004,12 +1017,13 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
 
 def run_managed_job(job: dict[str, Any]) -> None:
     app_data_dir = Path(job["app_data_dir"])
-    paths = app_paths(app_data_dir)
+    options = job.get("options", {})
+    pytorch_profile = normalize_pytorch_profile(options.get("runtimeProfile"))
+    paths = app_paths(app_data_dir, pytorch_profile)
     for key in ("runtime_dir", "model_dir", "output_dir", "jobs_dir"):
         paths[key].mkdir(parents=True, exist_ok=True)
 
     action = str(job.get("action", "generate"))
-    options = job.get("options", {})
     include_texture = action == "setup" or str(options.get("mode", "meshTexture")) != "meshOnly"
     configure_cuda_device(options.get("cudaDevice", "auto"))
     ensure_models(paths, include_texture=include_texture)

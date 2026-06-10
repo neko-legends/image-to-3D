@@ -32,6 +32,7 @@ const ENV_MARKER: &str = ".ih3d-env-v3-ready";
 const SOURCE_MARKER: &str = ".ih3d-source-v1-ready";
 const MODEL_MARKER: &str = ".ih3d-models-v1-ready";
 const WHEEL_MARKER: &str = ".ih3d-texture-wheels-v1-ready";
+const DEFAULT_PYTORCH_PROFILE: &str = "cu124";
 const AGENT_API_PORT: u16 = 17333;
 
 #[derive(Debug, Serialize)]
@@ -237,16 +238,36 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn env_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_data_dir(app)?.join("python-env"))
-}
-
 fn env_python_path(env_dir: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
         env_dir.join("Scripts").join("python.exe")
     } else {
         env_dir.join("bin").join("python")
     }
+}
+
+fn normalize_runtime_profile(profile: &str) -> String {
+    match profile.trim() {
+        "cu128" => "cu128".to_string(),
+        "cu124" => "cu124".to_string(),
+        _ => DEFAULT_PYTORCH_PROFILE.to_string(),
+    }
+}
+
+fn env_dir_for_profile(app: &AppHandle, profile: &str) -> Result<PathBuf, String> {
+    let app_data = app_data_dir(app)?;
+    let profile = normalize_runtime_profile(profile);
+    let profiled_env = app_data.join(format!("python-env-{profile}"));
+    if profiled_env.exists() {
+        return Ok(profiled_env);
+    }
+
+    let legacy_env = app_data.join("python-env");
+    if legacy_env.exists() && env_runtime_profile(&legacy_env) == profile {
+        return Ok(legacy_env);
+    }
+
+    Ok(profiled_env)
 }
 
 fn runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -596,7 +617,8 @@ fn model_cache_has_snapshot(model_root: &Path, repo: &str) -> bool {
 }
 
 fn runtime_ready_for_generation(app: &AppHandle, options: &HunyuanOptions) -> Result<(), String> {
-    let env = env_dir(app)?;
+    let requested_profile = normalize_runtime_profile(&options.runtime_profile);
+    let env = env_dir_for_profile(app, &requested_profile)?;
     let source = source_dir(app)?;
     let models = model_dir(app)?;
     let env_python = env_python_path(&env);
@@ -604,13 +626,9 @@ fn runtime_ready_for_generation(app: &AppHandle, options: &HunyuanOptions) -> Re
         return Err("Setup is needed before generation. Choose Set up now first.".to_string());
     }
     let installed_profile = env_runtime_profile(&env);
-    let requested_profile = options.runtime_profile.trim();
-    if !requested_profile.is_empty()
-        && installed_profile != "unknown"
-        && installed_profile != requested_profile
-    {
+    if installed_profile != "unknown" && installed_profile != requested_profile {
         return Err(format!(
-            "The app runtime is installed for {installed_profile}, but this job is set to {requested_profile}. Choose Prepare to reinstall the Python runtime for the selected PyTorch profile."
+            "The selected app runtime is installed for {installed_profile}, but this job is set to {requested_profile}. Choose Prepare to install the selected PyTorch profile."
         ));
     }
     if !source.join(SOURCE_MARKER).is_file() {
@@ -638,10 +656,15 @@ fn runtime_ready_for_generation(app: &AppHandle, options: &HunyuanOptions) -> Re
 }
 
 #[tauri::command]
-fn check_runtime(app: AppHandle) -> Result<RuntimeStatus, String> {
+fn check_runtime(app: AppHandle, runtime_profile: Option<String>) -> Result<RuntimeStatus, String> {
+    let requested_profile = normalize_runtime_profile(
+        runtime_profile
+            .as_deref()
+            .unwrap_or(DEFAULT_PYTORCH_PROFILE),
+    );
     let app_data = app_data_dir(&app)?;
     let worker = worker_path(&app)?;
-    let env = env_dir(&app)?;
+    let env = env_dir_for_profile(&app, &requested_profile)?;
     let env_python = env_python_path(&env);
     let source = source_dir(&app)?;
     let models = model_dir(&app)?;
@@ -967,16 +990,22 @@ fn cancel_active_job(active_jobs: State<'_, ActiveJobState>) -> Result<(), Strin
 fn reset_python_runtime(
     app: AppHandle,
     active_jobs: State<'_, ActiveJobState>,
+    runtime_profile: Option<String>,
 ) -> Result<RuntimeStatus, String> {
     if active_jobs.is_busy()? {
         return Err("Wait for the current job to finish before resetting the runtime.".to_string());
     }
-    let env = env_dir(&app)?;
+    let requested_profile = normalize_runtime_profile(
+        runtime_profile
+            .as_deref()
+            .unwrap_or(DEFAULT_PYTORCH_PROFILE),
+    );
+    let env = env_dir_for_profile(&app, &requested_profile)?;
     if env.exists() {
         fs::remove_dir_all(&env)
             .map_err(|error| format!("Unable to reset Python runtime: {error}"))?;
     }
-    check_runtime(app)
+    check_runtime(app, Some(requested_profile))
 }
 
 struct HttpRequest {
@@ -1177,9 +1206,8 @@ fn handle_agent_route(
             let status = agent_status_from(agent_state, active_jobs)?;
             serde_json::to_value(status).map_err(|error| error.to_string())
         }
-        ("GET", "/runtime") => {
-            serde_json::to_value(check_runtime(app.clone())?).map_err(|error| error.to_string())
-        }
+        ("GET", "/runtime") => serde_json::to_value(check_runtime(app.clone(), None)?)
+            .map_err(|error| error.to_string()),
         ("GET", "/vram") => {
             serde_json::to_value(get_vram_status()).map_err(|error| error.to_string())
         }
@@ -1215,7 +1243,10 @@ fn handle_agent_route(
                     "Wait for the current job to finish before resetting the runtime.".to_string(),
                 );
             }
-            let env = env_dir(app)?;
+            let request = parse_agent_job_request(&request.body)?;
+            let options = agent_options_from_request(request.options)?;
+            let runtime_profile = normalize_runtime_profile(&options.runtime_profile);
+            let env = env_dir_for_profile(app, &runtime_profile)?;
             if env.exists() {
                 fs::remove_dir_all(&env)
                     .map_err(|error| format!("Unable to reset Python runtime: {error}"))?;

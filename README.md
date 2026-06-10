@@ -19,7 +19,7 @@ Use the app like a normal desktop tool.
    Or run the installer:
 
    ```text
-   release\installer\Image To Hunyuan 3D_26.6.13_x64-setup.exe
+   release\installer\Image To Hunyuan 3D_26.6.17_x64-setup.exe
    ```
 
 2. On first launch, the app checks what is already installed. If setup is
@@ -59,7 +59,8 @@ or commit a project `.venv`; the app creates its managed runtime under app data.
 
 Managed app data contains:
 
-- `python-env` - app-owned Python environment.
+- `python-env*` - app-owned Python environments for selected PyTorch runtime
+  profiles.
 - `runtime\Hunyuan3D-2.1` - downloaded Hunyuan source.
 - `runtime\ComfyUI-Hunyuan3d-2-1-wheels` - Windows texture wheel source.
 - `models` - Hugging Face model cache.
@@ -86,9 +87,12 @@ Runtime profiles:
 - `cu128` installs `torch==2.7.1+cu128`, `torchvision==0.22.1+cu128`,
   `torchaudio==2.7.1+cu128`. This is intended for RTX 50 / Blackwell GPUs.
 
-Changing the runtime profile and choosing `Prepare` recreates the managed
-Python environment for that profile. The `Reset Env` button removes only the
-managed Python environment; models stay downloaded.
+Choosing a different CUDA GPU does not delete files or reinstall packages; the
+worker only points CUDA at the selected card. Changing the PyTorch runtime
+profile and choosing `Prepare` installs or reuses the managed Python environment
+for that profile. Runtime profiles can live side by side, and `Reset Env`
+removes only the selected Python runtime environment; models and outputs stay
+untouched.
 
 ### Build And Release
 
@@ -120,7 +124,7 @@ npm run release:build
 Release outputs:
 
 - `release\portable\image-to-hunyuan-3d.exe`
-- `release\installer\Image To Hunyuan 3D_26.6.13_x64-setup.exe`
+- `release\installer\Image To Hunyuan 3D_26.6.17_x64-setup.exe`
 
 ### Headless Runner
 
