@@ -1,0 +1,24 @@
+# Runtime notes for Image To Hunyuan 3D
+#
+# Standalone direction:
+# - No repository .venv is used or committed.
+# - The app creates its own Python environment under the app data folder:
+#   %APPDATA%\public.image.to.hunyuan3d\python-env
+# - Source, model caches, jobs, and outputs also live under app data.
+#
+# First-run runtime plan:
+# - Python: 3.10, 3.11, or 3.12
+# - PyTorch CUDA: torch==2.5.1+cu124, torchvision==0.20.1+cu124,
+#   torchaudio==2.5.1+cu124
+# - Hunyuan source: https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1
+# - Texture Windows wheels: https://github.com/visualbruno/ComfyUI-Hunyuan3d-2-1
+# - Model weights: tencent/Hunyuan3D-2.1
+# - Texture conditioning: facebook/dinov2-giant
+# - RealESRGAN: RealESRGAN_x4plus.pth from xinntao/Real-ESRGAN
+#
+# The app installs a curated inference dependency set, not the full upstream
+# requirements.txt. The full file includes demo/API/training packages such as
+# Gradio, FastAPI, Blender Python, Cupy, and Deepspeed that are unnecessary for
+# this desktop worker and much more fragile on Windows.
+#
+# NVIDIA GPUs are the design target. CPU generation is not a supported path.

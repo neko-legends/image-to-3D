@@ -1,0 +1,965 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import random
+import re
+import shutil
+import subprocess
+import sys
+import time
+import traceback
+import urllib.error
+import urllib.request
+import venv
+import zipfile
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any
+
+
+def configure_text_streams() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+configure_text_streams()
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8:replace")
+os.environ.setdefault("TQDM_ASCII", "1")
+
+
+HUNYUAN_REPO = "Tencent-Hunyuan/Hunyuan3D-2.1"
+HUNYUAN_SOURCE_URL = "https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1/archive/refs/heads/main.zip"
+WHEEL_SOURCE_URL = "https://github.com/visualbruno/ComfyUI-Hunyuan3d-2-1/archive/refs/heads/main.zip"
+REALESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+MODEL_REPO = "tencent/Hunyuan3D-2.1"
+DINO_REPO = "facebook/dinov2-giant"
+ENV_MARKER = ".ih3d-env-v3-ready"
+SOURCE_MARKER = ".ih3d-source-v1-ready"
+MODEL_MARKER = ".ih3d-models-v1-ready"
+WHEEL_MARKER = ".ih3d-texture-wheels-v1-ready"
+PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu124"
+BOOTSTRAP_PACKAGES = ["pip>=24.3", "setuptools>=70.0", "wheel>=0.43"]
+PYTORCH_CUDA_PACKAGES = [
+    "torch==2.5.1+cu124",
+    "torchvision==0.20.1+cu124",
+    "torchaudio==2.5.1+cu124",
+]
+COMPAT_PACKAGES = [
+    "numpy==1.26.4",
+    "requests>=2.32.0",
+    "pillow>=10.4.0",
+]
+HUNYUAN_RUNTIME_PACKAGES = [
+    "ninja==1.11.1.1",
+    "pybind11==2.13.4",
+    "transformers==4.46.0",
+    "diffusers==0.30.0",
+    "accelerate==1.1.1",
+    "pytorch-lightning==1.9.5",
+    "huggingface-hub==0.30.2",
+    "safetensors==0.4.4",
+    "scipy==1.14.1",
+    "einops==0.8.0",
+    "opencv-python==4.10.0.84",
+    "imageio==2.36.0",
+    "scikit-image==0.24.0",
+    "rembg==2.0.65",
+    "realesrgan==0.3.0",
+    "basicsr==1.4.2",
+    "trimesh==4.4.7",
+    "pymeshlab==2022.2.post3",
+    "pygltflib==1.16.3",
+    "xatlas==0.0.9",
+    "omegaconf==2.3.0",
+    "pyyaml==6.0.2",
+    "configargparse==1.7",
+    "tqdm==4.66.5",
+    "psutil==6.0.0",
+    "onnxruntime==1.16.3",
+    "torchmetrics==1.6.0",
+    "timm",
+    "torchdiffeq",
+]
+MESH_EXTENSIONS = {".glb", ".gltf", ".obj", ".ply"}
+PYTHON_VERSION_RE = re.compile(r"Python\s+(\d+)\.(\d+)\.(\d+)")
+
+
+def emit(event_type: str, message: str | None = None, **payload: Any) -> None:
+    event: dict[str, Any] = {"type": event_type}
+    if message:
+        event["message"] = message
+    event.update(payload)
+    print(json.dumps(event, ensure_ascii=True), flush=True)
+
+
+def app_paths(app_data_dir: Path) -> dict[str, Path]:
+    runtime_dir = app_data_dir / "runtime"
+    return {
+        "app_data": app_data_dir,
+        "env_dir": app_data_dir / "python-env",
+        "runtime_dir": runtime_dir,
+        "source_dir": runtime_dir / "Hunyuan3D-2.1",
+        "wheel_source_dir": runtime_dir / "ComfyUI-Hunyuan3d-2-1-wheels",
+        "model_dir": app_data_dir / "models",
+        "output_dir": app_data_dir / "outputs",
+        "jobs_dir": app_data_dir / "jobs",
+    }
+
+
+def venv_python(env_dir: Path) -> Path:
+    if platform.system() == "Windows":
+        return env_dir / "Scripts" / "python.exe"
+    return env_dir / "bin" / "python"
+
+
+def parse_python_version(text: str) -> tuple[int, int, int] | None:
+    match = PYTHON_VERSION_RE.search(text)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def python_version(python_path: Path) -> tuple[int, int, int] | None:
+    try:
+        output = subprocess.check_output(
+            [str(python_path), "--version"],
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception:
+        return None
+    return parse_python_version(output)
+
+
+def supported_python_version(version: tuple[int, int, int] | None) -> bool:
+    return bool(version and version[0] == 3 and 10 <= version[1] <= 12)
+
+
+def parse_compute_cap(value: str) -> tuple[int, int] | None:
+    match = re.search(r"(\d+)(?:\.(\d+))?", value)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2) or 0)
+
+
+def parse_memory_mb(value: str) -> int:
+    match = re.search(r"(\d+)", value.replace(",", ""))
+    return int(match.group(1)) if match else 0
+
+
+def nvidia_gpus() -> list[dict[str, Any]]:
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,compute_cap,memory.total",
+                "--format=csv,noheader",
+            ],
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception:
+        return []
+
+    gpus: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) < 4:
+            continue
+        cap = parse_compute_cap(parts[2])
+        if cap is None:
+            continue
+        gpus.append(
+            {
+                "index": parts[0],
+                "name": parts[1],
+                "capability": cap,
+                "memory_mb": parse_memory_mb(parts[3]),
+            }
+        )
+    return gpus
+
+
+def cap_label(capability: tuple[int, int]) -> str:
+    return f"sm_{capability[0]}{capability[1]}"
+
+
+def torch_supported_cuda_caps() -> list[tuple[int, int]]:
+    try:
+        output = subprocess.check_output(
+            [
+                sys.executable,
+                "-c",
+                "import json, torch; print(json.dumps(torch.cuda.get_arch_list()))",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        arches = json.loads(output)
+    except Exception:
+        return []
+    caps = []
+    for arch in arches:
+        if not arch.startswith("sm_"):
+            continue
+        digits = arch.removeprefix("sm_")
+        if len(digits) < 2 or not digits.isdigit():
+            continue
+        caps.append((int(digits[:-1]), int(digits[-1])))
+    return caps
+
+
+def cuda_cap_is_supported(device_cap: tuple[int, int], supported_caps: list[tuple[int, int]]) -> bool:
+    if device_cap in supported_caps:
+        return True
+    device_major, device_minor = device_cap
+    return any(major == device_major and minor <= device_minor for major, minor in supported_caps)
+
+
+def configure_cuda_device() -> None:
+    if os.environ.get("CUDA_VISIBLE_DEVICES"):
+        emit("setup", f"Using CUDA device override: {os.environ['CUDA_VISIBLE_DEVICES']}")
+        return
+
+    gpus = nvidia_gpus()
+    if not gpus:
+        return
+
+    supported_caps = torch_supported_cuda_caps()
+    if not supported_caps:
+        return
+
+    default_gpu = gpus[0]
+    if cuda_cap_is_supported(default_gpu["capability"], supported_caps):
+        emit("setup", f"Using {default_gpu['name']} for CUDA")
+        return
+
+    compatible = [gpu for gpu in gpus if cuda_cap_is_supported(gpu["capability"], supported_caps)]
+    if not compatible:
+        supported = ", ".join(cap_label(cap) for cap in supported_caps)
+        detected = ", ".join(f"{gpu['name']} {cap_label(gpu['capability'])}" for gpu in gpus)
+        raise RuntimeError(
+            "The installed PyTorch CUDA runtime does not support the detected NVIDIA GPU. "
+            f"Detected: {detected}. Supported by this runtime: {supported}."
+        )
+
+    selected = max(compatible, key=lambda gpu: gpu["memory_mb"])
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = selected["index"]
+    emit(
+        "setup",
+        f"Using {selected['name']} for CUDA because {default_gpu['name']} is not supported by this PyTorch runtime",
+    )
+
+
+def sanitize_installer_line(line: str) -> str | None:
+    if line.startswith("Collecting "):
+        package = line.removeprefix("Collecting ").split()[0]
+        return f"Resolving dependency: {package}"
+    if line.startswith("Downloading "):
+        return "Downloading dependency packages"
+    if line.startswith("Installing collected packages"):
+        return "Installing dependency packages"
+    if line.startswith("Successfully installed"):
+        return "Dependency install step finished"
+    if "already satisfied" in line.lower():
+        return None
+    if line.startswith("ERROR:") or " error:" in line.lower() or "failed" in line.lower():
+        return line
+    return None
+
+
+def run_checked(command: list[str], message: str, cwd: Path | None = None) -> None:
+    emit("setup", f"{message}. This can take several minutes.")
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert process.stdout is not None
+    tail: list[str] = []
+    error_lines: list[str] = []
+    last_status: str | None = None
+    for line in process.stdout:
+        line = line.strip()
+        if not line:
+            continue
+        tail.append(line)
+        tail = tail[-80:]
+        lowered = line.lower()
+        if line.startswith("ERROR:") or " error:" in lowered or "failed" in lowered:
+            error_lines.append(line)
+            error_lines = error_lines[-20:]
+        status = sanitize_installer_line(line)
+        if status and status != last_status:
+            emit("setup", status)
+            last_status = status
+    code = process.wait()
+    if code != 0:
+        sections = []
+        if error_lines:
+            sections.append("Error lines:\n" + "\n".join(error_lines))
+        sections.append("Last installer output:\n" + ("\n".join(tail) if tail else "No installer output was captured."))
+        details = "\n\n".join(sections)
+        raise RuntimeError(f"{message} failed.\n\n{details}")
+
+
+def emit_download_progress(name: str, downloaded: int, total: int | None, message: str | None = None) -> None:
+    percent = None
+    if total and total > 0:
+        percent = min(100.0, round(downloaded / total * 100, 1))
+    emit(
+        "download_progress",
+        message or f"Downloading {name}",
+        name=name,
+        bytesDownloaded=downloaded,
+        bytesTotal=total,
+        percent=percent,
+    )
+
+
+def emit_item_progress(name: str, current: int, total: int | None, message: str | None = None) -> None:
+    percent = None
+    if total and total > 0:
+        percent = min(100.0, round(current / total * 100, 1))
+    emit(
+        "download_progress",
+        message or f"Downloading {name}",
+        name=name,
+        itemsDownloaded=current,
+        itemsTotal=total,
+        percent=percent,
+    )
+
+
+class SilentProgressWriter:
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+def hf_snapshot_progress_class(label: str):
+    from tqdm.auto import tqdm
+
+    class HfSnapshotProgress(tqdm):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._ih3d_label = label
+            self._ih3d_last_percent: float | None = None
+            self._ih3d_last_current: int | None = None
+            self._ih3d_last_total: int | None = None
+            self._ih3d_last_emit = 0.0
+            kwargs["file"] = SilentProgressWriter()
+            kwargs["ascii"] = True
+            kwargs["dynamic_ncols"] = False
+            kwargs.setdefault("mininterval", 0.5)
+            super().__init__(*args, **kwargs)
+            self._emit_progress(force=True)
+
+        def update(self, n: float = 1) -> bool | None:
+            result = super().update(n)
+            self._emit_progress()
+            return result
+
+        def close(self) -> None:
+            self._emit_progress(force=True)
+            super().close()
+
+        def _emit_progress(self, force: bool = False) -> None:
+            total = int(self.total or 0)
+            current = int(self.n or 0)
+            percent = round(current / total * 100, 1) if total > 0 else None
+            now = time.monotonic()
+            if (
+                current == self._ih3d_last_current
+                and total == self._ih3d_last_total
+                and (force or percent == self._ih3d_last_percent or now - self._ih3d_last_emit < 1.0)
+            ):
+                return
+            self._ih3d_last_percent = percent
+            self._ih3d_last_current = current
+            self._ih3d_last_total = total
+            self._ih3d_last_emit = now
+            emit_item_progress(self._ih3d_label, current, total or None)
+
+    return HfSnapshotProgress
+
+
+def download_file(url: str, destination: Path, label: str) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(url, headers={"User-Agent": "ImageToHunyuan3D/26.6.13"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            total_header = response.headers.get("Content-Length")
+            total = int(total_header) if total_header and total_header.isdigit() else None
+            temp_path = destination.with_suffix(destination.suffix + ".tmp")
+            downloaded = 0
+            next_emit = 0
+            with temp_path.open("wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+                    downloaded += len(chunk)
+                    if downloaded >= next_emit:
+                        emit_download_progress(label, downloaded, total)
+                        next_emit = downloaded + max((total or 100_000_000) // 100, 8 * 1024 * 1024)
+            temp_path.replace(destination)
+            emit_download_progress(label, downloaded, total or downloaded, f"Downloaded {label}")
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Could not download {label}: {error}") from error
+
+
+def safe_extract_zip(zip_path: Path, destination: Path) -> Path:
+    if destination.exists():
+        shutil.rmtree(destination, ignore_errors=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory() as temp:
+        temp_dir = Path(temp)
+        with zipfile.ZipFile(zip_path) as archive:
+            for info in archive.infolist():
+                normalized = Path(info.filename)
+                if normalized.is_absolute() or ".." in normalized.parts:
+                    raise RuntimeError(f"Refusing unsafe zip entry: {info.filename}")
+            archive.extractall(temp_dir)
+        roots = [path for path in temp_dir.iterdir() if path.is_dir()]
+        if len(roots) != 1:
+            raise RuntimeError(f"Unexpected archive shape in {zip_path}")
+        shutil.move(str(roots[0]), str(destination))
+    return destination
+
+
+def ensure_source(paths: dict[str, Path]) -> Path:
+    source_dir = paths["source_dir"]
+    marker = source_dir / SOURCE_MARKER
+    if marker.exists():
+        return source_dir
+
+    emit("setup", f"Downloading Hunyuan3D source: {HUNYUAN_REPO}")
+    archive = paths["runtime_dir"] / "Hunyuan3D-2.1-main.zip"
+    download_file(HUNYUAN_SOURCE_URL, archive, "Hunyuan3D source")
+    safe_extract_zip(archive, source_dir)
+    marker.write_text("ok\n", encoding="utf-8")
+    return source_dir
+
+
+def patch_hunyuan_source(source_dir: Path) -> None:
+    texture_pipeline = source_dir / "hy3dpaint" / "textureGenPipeline.py"
+    if not texture_pipeline.is_file():
+        return
+    content = texture_pipeline.read_text(encoding="utf-8")
+    original = content
+    content = content.replace(
+        "from DifferentiableRenderer.mesh_utils import convert_obj_to_glb",
+        "from convert_utils import create_glb_with_pbr_materials",
+    )
+    content = content.replace(
+        '            convert_obj_to_glb(output_mesh_path, output_mesh_path.replace(".obj", ".glb"))\n'
+        '            output_glb_path = output_mesh_path.replace(".obj", ".glb")',
+        '            textures = {\n'
+        '                "albedo": output_mesh_path.replace(".obj", ".jpg"),\n'
+        '                "metallic": output_mesh_path.replace(".obj", "_metallic.jpg"),\n'
+        '                "roughness": output_mesh_path.replace(".obj", "_roughness.jpg"),\n'
+        '            }\n'
+        '            create_glb_with_pbr_materials(output_mesh_path, textures, output_mesh_path.replace(".obj", ".glb"))\n'
+        '            output_glb_path = output_mesh_path.replace(".obj", ".glb")',
+    )
+    if content != original:
+        texture_pipeline.write_text(content, encoding="utf-8")
+        emit("setup", "Patched Hunyuan texture export for standalone GLB output")
+
+
+def ensure_wheel_source(paths: dict[str, Path]) -> Path:
+    wheel_source_dir = paths["wheel_source_dir"]
+    if (wheel_source_dir / "hy3dpaint").is_dir():
+        return wheel_source_dir
+    emit("setup", "Downloading Windows texture wheels")
+    archive = paths["runtime_dir"] / "ComfyUI-Hunyuan3d-2-1-main.zip"
+    download_file(WHEEL_SOURCE_URL, archive, "texture wheels")
+    safe_extract_zip(archive, wheel_source_dir)
+    return wheel_source_dir
+
+
+def matching_wheel(dist_dir: Path, package_prefix: str, version: tuple[int, int, int]) -> Path | None:
+    tag = f"cp{version[0]}{version[1]}"
+    candidates = sorted(dist_dir.glob(f"{package_prefix}*{tag}*win_amd64.whl"))
+    return candidates[0] if candidates else None
+
+
+def install_texture_wheels(python_path: Path, paths: dict[str, Path]) -> None:
+    marker = paths["env_dir"] / WHEEL_MARKER
+    if marker.exists():
+        return
+    if platform.system() != "Windows":
+        emit(
+            "setup",
+            "Texture native wheels are prebuilt for Windows. Non-Windows setup will use source builds if available.",
+        )
+        marker.write_text("non-windows\n", encoding="utf-8")
+        return
+
+    version = python_version(python_path)
+    if not supported_python_version(version):
+        raise RuntimeError("Texture wheels require Python 3.10, 3.11, or 3.12.")
+    assert version is not None
+
+    wheel_source = ensure_wheel_source(paths)
+    raster = matching_wheel(
+        wheel_source / "hy3dpaint" / "custom_rasterizer" / "dist",
+        "custom_rasterizer",
+        version,
+    )
+    painter = matching_wheel(
+        wheel_source / "hy3dpaint" / "DifferentiableRenderer" / "dist",
+        "mesh_inpaint_processor",
+        version,
+    )
+
+    missing = []
+    if raster is None:
+        missing.append("custom_rasterizer")
+    if painter is None:
+        missing.append("mesh_inpaint_processor")
+    if missing:
+        tag = f"cp{version[0]}{version[1]}"
+        raise RuntimeError(
+            f"Missing prebuilt texture wheel(s) for {tag}: {', '.join(missing)}. "
+            "Install Python 3.10, 3.11, or 3.12 and run Prepare again."
+        )
+
+    pip = [str(python_path), "-m", "pip"]
+    run_checked(pip + ["install", "--upgrade", str(raster)], "Installing texture rasterizer wheel")
+    run_checked(pip + ["install", "--upgrade", str(painter)], "Installing texture inpaint wheel")
+    marker.write_text("ok\n", encoding="utf-8")
+
+
+def ensure_env(paths: dict[str, Path], source_dir: Path) -> Path:
+    env_dir = paths["env_dir"]
+    python_path = venv_python(env_dir)
+    if python_path.exists() and not supported_python_version(python_version(python_path)):
+        emit("setup", "Recreating app Python environment with a supported Python version")
+        shutil.rmtree(env_dir, ignore_errors=True)
+
+    if not python_path.exists():
+        emit("setup", f"Creating app Python environment: {env_dir}")
+        venv.EnvBuilder(with_pip=True).create(env_dir)
+
+    if not supported_python_version(python_version(python_path)):
+        raise RuntimeError("Image To Hunyuan 3D requires Python 3.10, 3.11, or 3.12.")
+
+    marker = env_dir / ENV_MARKER
+    if marker.exists():
+        return python_path
+
+    pip = [str(python_path), "-m", "pip"]
+    run_checked(pip + ["install", "--upgrade", *BOOTSTRAP_PACKAGES], "Updating pip")
+    run_checked(
+        pip + ["install", "--upgrade", *PYTORCH_CUDA_PACKAGES, "--index-url", PYTORCH_CUDA_INDEX_URL],
+        "Installing NVIDIA PyTorch runtime",
+    )
+    run_checked(pip + ["install", "--upgrade", *COMPAT_PACKAGES], "Installing shared runtime packages")
+    run_checked(
+        pip + ["install", "--upgrade", *HUNYUAN_RUNTIME_PACKAGES],
+        "Installing Hunyuan inference dependencies",
+    )
+    run_checked(pip + ["install", "--upgrade", "numpy==1.26.4"], "Pinning compatible NumPy")
+    install_texture_wheels(python_path, paths)
+    marker.write_text("ok\n", encoding="utf-8")
+    return python_path
+
+
+def prepare_managed_environment(app_data_dir: Path) -> tuple[Path, dict[str, Path]]:
+    paths = app_paths(app_data_dir)
+    for key in ("runtime_dir", "model_dir", "output_dir", "jobs_dir"):
+        paths[key].mkdir(parents=True, exist_ok=True)
+    source_dir = ensure_source(paths)
+    patch_hunyuan_source(source_dir)
+    python_path = ensure_env(paths, source_dir)
+    return python_path, paths
+
+
+def managed_env_vars(app_data_dir: Path, paths: dict[str, Path]) -> dict[str, str]:
+    env = os.environ.copy()
+    env["IH3D_IN_MANAGED_ENV"] = "1"
+    env["IH3D_SOURCE_DIR"] = str(paths["source_dir"])
+    env["HF_HOME"] = str(paths["model_dir"] / "huggingface")
+    env["HF_HUB_CACHE"] = str(paths["model_dir"] / "huggingface" / "hub")
+    env["TRANSFORMERS_CACHE"] = str(paths["model_dir"] / "huggingface" / "transformers")
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8:replace"
+    env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
+    env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    env["TQDM_ASCII"] = "1"
+    env["XFORMERS_FORCE_DISABLE_TRITON"] = "1"
+    env["IH3D_APP_DATA_DIR"] = str(app_data_dir)
+    return env
+
+
+def reinvoke_inside_env(python_path: Path, job_path: Path, app_data_dir: Path, paths: dict[str, Path]) -> int:
+    command = [str(python_path), str(Path(__file__).resolve()), "--job", str(job_path)]
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=managed_env_vars(app_data_dir, paths),
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="", flush=True)
+    return process.wait()
+
+
+def ensure_realesrgan(paths: dict[str, Path]) -> Path:
+    ckpt = paths["source_dir"] / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth"
+    if ckpt.is_file():
+        return ckpt
+    download_file(REALESRGAN_URL, ckpt, "RealESRGAN texture enhancer")
+    return ckpt
+
+
+def ensure_models(paths: dict[str, Path], include_texture: bool = True) -> None:
+    paths["model_dir"].mkdir(parents=True, exist_ok=True)
+    marker = paths["model_dir"] / MODEL_MARKER
+    realesrgan = paths["source_dir"] / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth"
+    if marker.exists() and (not include_texture or realesrgan.is_file()):
+        return
+    ensure_realesrgan(paths)
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import disable_progress_bars
+
+    disable_progress_bars()
+
+    emit("model", "Downloading Hunyuan3D 2.1 model bundle")
+    snapshot_download(
+        repo_id=MODEL_REPO,
+        allow_patterns=[
+            "README.md",
+            "hunyuan3d-dit-v2-1/*",
+            "hunyuan3d-vae-v2-1/*",
+            "hunyuan3d-paintpbr-v2-1/*",
+        ],
+        local_files_only=False,
+        tqdm_class=hf_snapshot_progress_class("Hunyuan3D model files"),
+    )
+    if include_texture:
+        emit("model", "Downloading DINOv2 texture conditioning model")
+        snapshot_download(
+            repo_id=DINO_REPO,
+            local_files_only=False,
+            tqdm_class=hf_snapshot_progress_class("DINOv2 model files"),
+        )
+    marker.write_text("ok\n", encoding="utf-8")
+
+
+def slugify(value: str, fallback: str = "asset") -> str:
+    stem = Path(value).stem if value else fallback
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return (slug or fallback)[:72]
+
+
+def unique_target(path: Path, overwrite: bool) -> Path:
+    if overwrite or not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(2, 10_000):
+        candidate = path.with_name(f"{stem}_{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not find an available output name for {path}")
+
+
+def as_bool(value: Any, default: bool = False) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def as_int(value: Any, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
+def as_float(value: Any, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
+def seed_value(options: dict[str, Any], key: str, mode_key: str) -> int:
+    if str(options.get(mode_key, "fixed")) == "randomize":
+        return random.randint(0, 999_999_999)
+    return as_int(options.get(key), 1, 0, 999_999_999)
+
+
+def parse_number_list(value: str, default: list[float]) -> list[float]:
+    try:
+        parsed = [float(part.strip()) for part in value.split(",") if part.strip()]
+    except Exception:
+        return default
+    return parsed or default
+
+
+def texture_view_count(options: dict[str, Any]) -> int:
+    azimuths = parse_number_list(str(options.get("cameraAzimuths", "")), [0, 90, 180, 270, 0, 180])
+    return max(6, min(9, len(azimuths)))
+
+
+def output_base_name(options: dict[str, Any], input_path: Path, index: int, total: int) -> str:
+    requested = str(options.get("outputName", "")).strip()
+    if not requested:
+        return slugify(input_path.name)
+    base = slugify(requested)
+    return f"{base}_{index + 1:03d}" if total > 1 else base
+
+
+def image_has_alpha(path: Path) -> bool:
+    from PIL import Image
+
+    with Image.open(path) as image:
+        if image.mode != "RGBA":
+            return False
+        alpha = image.getchannel("A")
+        return alpha.getextrema()[0] < 255
+
+
+def load_condition_image(path: Path):
+    from PIL import Image
+
+    image = Image.open(path)
+    if image.mode == "RGBA" and image_has_alpha(path):
+        return image.convert("RGBA")
+    from hy3dshape.rembg import BackgroundRemover
+
+    emit("stage_start", f"Removing background for {path.name}", path=str(path))
+    rembg = BackgroundRemover()
+    return rembg(image.convert("RGB"))
+
+
+def find_existing_output(*paths: Path) -> list[str]:
+    output = []
+    for path in paths:
+        if path.is_file():
+            output.append(str(path.resolve()))
+    return output
+
+
+def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
+    source_dir = paths["source_dir"]
+    launch_cwd = Path.cwd()
+    sys.path.insert(0, str(source_dir))
+    sys.path.insert(0, str(source_dir / "hy3dshape"))
+    sys.path.insert(0, str(source_dir / "hy3dpaint"))
+    os.chdir(source_dir)
+
+    try:
+        from torchvision_fix import apply_fix
+
+        apply_fix()
+    except Exception as error:
+        emit("setup", f"torchvision compatibility fix skipped: {error}")
+
+    import torch
+    from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
+    from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
+
+    options = job.get("options", {})
+    mode = str(options.get("mode", "meshTexture"))
+    overwrite = as_bool(options.get("overwrite"), False)
+    requested_output = Path(str(options.get("outputDir", "")).strip() or paths["output_dir"])
+    if not requested_output.is_absolute():
+        requested_output = (launch_cwd / requested_output).resolve()
+    requested_output.mkdir(parents=True, exist_ok=True)
+    run_dir = paths["jobs_dir"] / job.get("job_id", f"job-{int(time.time())}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    input_paths = [Path(path) for path in job.get("paths", [])]
+    total = len(input_paths)
+    failed_count = 0
+
+    shape_pipeline = None
+    if mode != "textureOnly":
+        emit("model", "Loading Hunyuan3D shape model on CUDA")
+        shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(MODEL_REPO)
+        if as_bool(options.get("forceOffload"), False) and hasattr(shape_pipeline, "enable_model_cpu_offload"):
+            shape_pipeline.enable_model_cpu_offload()
+
+    paint_pipeline = None
+    if mode != "meshOnly":
+        emit("model", "Loading Hunyuan3D PBR texture model on CUDA")
+        max_num_view = texture_view_count(options)
+        resolution = as_int(options.get("textureViewSize"), 512, 256, 2048)
+        config = Hunyuan3DPaintConfig(max_num_view, resolution)
+        config.realesrgan_ckpt_path = str(source_dir / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth")
+        config.multiview_cfg_path = str(source_dir / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml")
+        config.custom_pipeline = str(source_dir / "hy3dpaint" / "hunyuanpaintpbr")
+        if hasattr(config, "texture_size"):
+            config.texture_size = as_int(options.get("textureSize"), getattr(config, "texture_size"), 512, 8192)
+        paint_pipeline = Hunyuan3DPaintPipeline(config)
+
+    for index, image_path in enumerate(input_paths):
+        emit("image_start", f"Processing {image_path.name}", path=str(image_path))
+        try:
+            if not image_path.is_file():
+                raise RuntimeError(f"Input image was not found: {image_path}")
+
+            base = output_base_name(options, image_path, index, total)
+            final_mesh_path = unique_target(requested_output / f"{base}.glb", overwrite)
+            intermediate_mesh = run_dir / f"{base}_mesh.glb"
+            outputs: list[str] = []
+
+            if mode != "textureOnly":
+                assert shape_pipeline is not None
+                image = load_condition_image(image_path)
+                seed = seed_value(options, "meshSeed", "meshSeedMode")
+                generator = torch.Generator(device="cuda").manual_seed(seed % (2**32))
+                emit("stage_start", f"Generating mesh for {image_path.name}", path=str(image_path))
+                meshes = shape_pipeline(
+                    image=image,
+                    num_inference_steps=as_int(options.get("meshSteps"), 50, 1, 200),
+                    guidance_scale=as_float(options.get("meshGuidance"), 5.0, 0, 30),
+                    generator=generator,
+                    box_v=as_float(options.get("boxV"), 1.01, 0.1, 5),
+                    octree_resolution=as_int(options.get("octreeResolution"), 384, 64, 2048),
+                    mc_level=as_float(options.get("mcLevel"), 0.0, -10, 10),
+                    mc_algo=str(options.get("mcAlgo", "mc")) or None,
+                    num_chunks=as_int(options.get("numChunks"), 8000, 1024, 999999),
+                    enable_pbar=False,
+                )
+                mesh = meshes[0]
+                mesh.export(intermediate_mesh)
+                outputs.append(str(intermediate_mesh.resolve()))
+                emit("stage_done", f"Mesh saved: {intermediate_mesh.name}", path=str(image_path), output=str(intermediate_mesh))
+
+            if mode == "meshOnly":
+                shutil.copy2(intermediate_mesh, final_mesh_path)
+                outputs.append(str(final_mesh_path.resolve()))
+            else:
+                assert paint_pipeline is not None
+                mesh_source = (
+                    Path(str(options.get("meshInputPath", "")).strip())
+                    if mode == "textureOnly"
+                    else intermediate_mesh
+                )
+                if not mesh_source.is_file():
+                    raise RuntimeError(f"Source mesh was not found: {mesh_source}")
+                output_obj = final_mesh_path.with_suffix(".obj")
+                emit("stage_start", f"Generating PBR texture for {image_path.name}", path=str(image_path))
+                result = paint_pipeline(
+                    mesh_path=str(mesh_source),
+                    image_path=str(image_path),
+                    output_mesh_path=str(output_obj),
+                    use_remesh=False,
+                    save_glb=True,
+                )
+                result_path = Path(str(result)) if result else output_obj
+                glb_candidate = output_obj.with_suffix(".glb")
+                if glb_candidate.exists() and glb_candidate != final_mesh_path:
+                    if final_mesh_path.exists() and overwrite:
+                        final_mesh_path.unlink()
+                    shutil.move(str(glb_candidate), str(final_mesh_path))
+                elif result_path.suffix.lower() == ".glb" and result_path.exists() and result_path != final_mesh_path:
+                    if final_mesh_path.exists() and overwrite:
+                        final_mesh_path.unlink()
+                    shutil.move(str(result_path), str(final_mesh_path))
+                outputs.extend(find_existing_output(final_mesh_path, output_obj, output_obj.with_suffix(".jpg")))
+
+            emit("image_done", "Saved output", path=str(image_path), outputs=outputs)
+        except Exception as error:
+            failed_count += 1
+            emit("image_error", str(error), path=str(image_path), traceback=traceback.format_exc())
+
+    if failed_count:
+        emit("done", "Batch finished with errors.", failedCount=failed_count, totalCount=total)
+    else:
+        emit("done", "Batch finished.", failedCount=0, totalCount=total)
+
+
+def run_managed_job(job: dict[str, Any]) -> None:
+    app_data_dir = Path(job["app_data_dir"])
+    paths = app_paths(app_data_dir)
+    for key in ("runtime_dir", "model_dir", "output_dir", "jobs_dir"):
+        paths[key].mkdir(parents=True, exist_ok=True)
+
+    action = str(job.get("action", "generate"))
+    include_texture = action == "setup" or str(job.get("options", {}).get("mode", "meshTexture")) != "meshOnly"
+    configure_cuda_device()
+    ensure_models(paths, include_texture=include_texture)
+
+    if action == "setup":
+        emit("runtime_ready", "Standalone Hunyuan runtime is ready.")
+        emit("done", "Standalone Hunyuan runtime is ready.")
+        return
+
+    run_generation(job, paths)
+
+
+def run_outer(job_path: Path) -> int:
+    with job_path.open("r", encoding="utf-8") as handle:
+        job = json.load(handle)
+    app_data_dir = Path(job["app_data_dir"])
+    python_path, paths = prepare_managed_environment(app_data_dir)
+    return reinvoke_inside_env(python_path, job_path, app_data_dir, paths)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--job", required=True, type=Path)
+    args = parser.parse_args()
+
+    try:
+        if os.environ.get("IH3D_IN_MANAGED_ENV") == "1":
+            with args.job.open("r", encoding="utf-8") as handle:
+                job = json.load(handle)
+            run_managed_job(job)
+            return 0
+        return run_outer(args.job)
+    except KeyboardInterrupt:
+        emit("canceled", "Job canceled.")
+        return 130
+    except Exception as error:
+        emit("error", str(error), traceback=traceback.format_exc())
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

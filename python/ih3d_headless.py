@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import uuid
+from pathlib import Path
+
+
+APP_ID = "public.image.to.hunyuan3d"
+
+
+def default_app_data_dir() -> Path:
+    if os.name == "nt":
+        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        return base / APP_ID
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP_ID
+
+
+def default_output_dir(root: Path) -> Path:
+    portable_exe = root / "release" / "portable" / "image-to-hunyuan-3d.exe"
+    if portable_exe.exists():
+        return portable_exe.parent / "output"
+    return root / "output"
+
+
+def default_options(root: Path) -> dict[str, object]:
+    return {
+        "mode": "meshTexture",
+        "outputDir": str(default_output_dir(root)),
+        "outputName": "",
+        "meshInputPath": "",
+        "recursive": True,
+        "overwrite": False,
+        "meshSteps": 50,
+        "meshGuidance": 5.0,
+        "meshSeed": 2,
+        "meshSeedMode": "randomize",
+        "boxV": 1.01,
+        "octreeResolution": 384,
+        "numChunks": 8000,
+        "mcLevel": 0.0,
+        "mcAlgo": "mc",
+        "enableFlashVdm": False,
+        "forceOffload": False,
+        "removeFloaters": True,
+        "removeDegenerateFaces": True,
+        "reduceFaces": True,
+        "maxFaces": 15000,
+        "smoothNormals": True,
+        "textureViewSize": 512,
+        "textureSteps": 10,
+        "textureGuidance": 3.0,
+        "textureSize": 4096,
+        "textureSeed": 802344256,
+        "textureSeedMode": "randomize",
+        "unwrapMesh": True,
+        "cameraAzimuths": "0, 90, 180, 270, 0, 180",
+        "cameraElevations": "0, 0, 0, 0, 90, -90",
+        "viewWeights": "1, 0.1, 0.5, 0.1, 0.05, 0.05",
+        "orthoScale": 1.1,
+    }
+
+
+def parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run Image To Hunyuan 3D without the GUI.")
+    parser.add_argument("inputs", nargs="*", help="Input image paths for generation.")
+    parser.add_argument("--action", choices=["generate", "setup"], default="generate")
+    parser.add_argument("--mode", choices=["meshTexture", "meshOnly", "textureOnly"], default=None)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--output-name", default="")
+    parser.add_argument("--mesh-input-path", default="")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--mesh-steps", type=int, default=None)
+    parser.add_argument("--mesh-guidance", type=float, default=None)
+    parser.add_argument("--mesh-seed", type=int, default=None)
+    parser.add_argument("--mesh-seed-mode", choices=["fixed", "randomize"], default=None)
+    parser.add_argument("--octree-resolution", type=int, default=None)
+    parser.add_argument("--num-chunks", type=int, default=None)
+    parser.add_argument("--texture-view-size", type=int, default=None)
+    parser.add_argument("--texture-size", type=int, default=None)
+    parser.add_argument("--fast-preview", action="store_true", help="Use faster mesh-only preview settings.")
+    parser.add_argument("--app-data-dir", type=Path, default=None)
+    return parser
+
+
+def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
+    options = default_options(root)
+    if args.fast_preview:
+        options.update(
+            {
+                "mode": "meshOnly",
+                "meshSteps": 12,
+                "octreeResolution": 256,
+                "numChunks": 6000,
+            }
+        )
+    overrides = {
+        "mode": args.mode,
+        "outputDir": str(Path(args.output_dir).resolve()) if args.output_dir else None,
+        "outputName": args.output_name,
+        "meshInputPath": args.mesh_input_path,
+        "overwrite": args.overwrite if args.overwrite else None,
+        "meshSteps": args.mesh_steps,
+        "meshGuidance": args.mesh_guidance,
+        "meshSeed": args.mesh_seed,
+        "meshSeedMode": args.mesh_seed_mode,
+        "octreeResolution": args.octree_resolution,
+        "numChunks": args.num_chunks,
+        "textureViewSize": args.texture_view_size,
+        "textureSize": args.texture_size,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            options[key] = value
+    return options
+
+
+def main() -> int:
+    args = parser().parse_args()
+    root = Path(__file__).resolve().parents[1]
+    worker = root / "python" / "hunyuan_worker.py"
+    app_data_dir = args.app_data_dir or default_app_data_dir()
+    jobs_dir = app_data_dir / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.action == "generate" and not args.inputs:
+        print("No input images were provided.", file=sys.stderr)
+        return 2
+
+    job_id = f"headless-{uuid.uuid4()}"
+    job_path = jobs_dir / f"{job_id}.json"
+    job = {
+        "action": args.action,
+        "job_id": job_id,
+        "paths": [str(Path(path).resolve()) for path in args.inputs],
+        "options": build_options(args, root),
+        "app_data_dir": str(app_data_dir),
+    }
+    job_path.write_text(json.dumps(job, indent=2), encoding="utf-8")
+
+    process = subprocess.Popen(
+        [sys.executable, str(worker), "--job", str(job_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        print(line, end="", flush=True)
+    return process.wait()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

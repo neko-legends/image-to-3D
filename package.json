@@ -1,0 +1,35 @@
+{
+  "name": "image-to-hunyuan-3d",
+  "private": true,
+  "version": "26.6.13",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1430",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 1431",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "headless": "python python/ih3d_headless.py",
+    "release:publish": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-release.ps1",
+    "release:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-release.ps1 -Build"
+  },
+  "dependencies": {
+    "@google/model-viewer": "4.3.1",
+    "@tauri-apps/api": "2.11.0",
+    "@tauri-apps/plugin-dialog": "2.7.1",
+    "@tauri-apps/plugin-opener": "2.5.4",
+    "lucide-react": "0.468.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.2",
+    "@types/react": "18.3.28",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "5.1.2",
+    "typescript": "5.9.3",
+    "vite": "7.3.3"
+  }
+}

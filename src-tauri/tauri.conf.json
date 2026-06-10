@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Image To Hunyuan 3D",
+  "version": "26.6.13",
+  "identifier": "public.image.to.hunyuan3d",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1430",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Image To Hunyuan 3D",
+        "width": 1920,
+        "height": 1080,
+        "minWidth": 640,
+        "minHeight": 360,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "dragDropEnabled": true,
+        "backgroundColor": "#090806"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob: asset: https://asset.localhost; media-src 'self' data: blob: asset: https://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; connect-src ipc: http://ipc.localhost asset: https://asset.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": ["../python/hunyuan_worker.py"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "GraphicsAndDesign",
+    "shortDescription": "Standalone local Hunyuan 3D generator",
+    "longDescription": "Image To Hunyuan 3D manages its own Python runtime and Hunyuan3D 2.1 model downloads for local mesh and PBR texture generation on NVIDIA GPU systems."
+  }
+}
