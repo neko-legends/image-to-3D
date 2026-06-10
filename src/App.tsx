@@ -97,6 +97,7 @@ type HunyuanOptions = {
   mcLevel: number;
   mcAlgo: string;
   enableFlashVdm: boolean;
+  compileModels: boolean;
   forceOffload: boolean;
   removeFloaters: boolean;
   removeDegenerateFaces: boolean;
@@ -126,11 +127,14 @@ type QueueItem = {
 type WorkerEvent = {
   type:
     | "setup"
+    | "daemon_ready"
+    | "daemon_exit"
     | "model"
     | "runtime_ready"
     | "download_progress"
     | "stage_start"
     | "stage_done"
+    | "stage_timing"
     | "image_start"
     | "image_done"
     | "image_error"
@@ -200,7 +204,8 @@ const defaultOptions: HunyuanOptions = {
   numChunks: 8000,
   mcLevel: 0,
   mcAlgo: "mc",
-  enableFlashVdm: false,
+  enableFlashVdm: true,
+  compileModels: false,
   forceOffload: false,
   removeFloaters: true,
   removeDegenerateFaces: true,
@@ -208,7 +213,7 @@ const defaultOptions: HunyuanOptions = {
   maxFaces: 15000,
   smoothNormals: true,
   textureViewSize: 512,
-  textureSteps: 10,
+  textureSteps: 15,
   textureGuidance: 3,
   textureSize: 4096,
   textureSeed: 802344256,
@@ -304,6 +309,7 @@ function loadSavedOptions(): HunyuanOptions {
       mcLevel: coerceNumber(parsed.mcLevel, defaultOptions.mcLevel, -10, 10),
       mcAlgo: coerceString(parsed.mcAlgo, defaultOptions.mcAlgo),
       enableFlashVdm: coerceBoolean(parsed.enableFlashVdm, defaultOptions.enableFlashVdm),
+      compileModels: coerceBoolean(parsed.compileModels, defaultOptions.compileModels),
       forceOffload: coerceBoolean(parsed.forceOffload, defaultOptions.forceOffload),
       removeFloaters: coerceBoolean(parsed.removeFloaters, defaultOptions.removeFloaters),
       removeDegenerateFaces: coerceBoolean(
@@ -1190,6 +1196,24 @@ function App() {
                 <option value="dmc">DMC</option>
               </select>
             </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={options.enableFlashVdm}
+                disabled={options.mode === "textureOnly"}
+                onChange={(event) => setOptions((current) => ({ ...current, enableFlashVdm: event.target.checked }))}
+              />
+              <span>Fast VAE mesh decode</span>
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={options.compileModels}
+                disabled={options.mode === "textureOnly"}
+                onChange={(event) => setOptions((current) => ({ ...current, compileModels: event.target.checked }))}
+              />
+              <span>Compile shape model</span>
+            </label>
           </section>
 
           <section className="panel">
@@ -1229,6 +1253,67 @@ function App() {
                     }))
                   }
                 />
+              </label>
+            </div>
+            <div className="split-fields">
+              <label className="field">
+                <span>Steps</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={options.textureSteps}
+                  disabled={options.mode === "meshOnly"}
+                  onChange={(event) =>
+                    setOptions((current) => ({
+                      ...current,
+                      textureSteps: Number(event.target.value) || current.textureSteps
+                    }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>CFG</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="30"
+                  step="0.1"
+                  value={options.textureGuidance}
+                  disabled={options.mode === "meshOnly"}
+                  onChange={(event) =>
+                    setOptions((current) => ({
+                      ...current,
+                      textureGuidance: Number(event.target.value) || current.textureGuidance
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            <div className="seed-row">
+              <label className="field">
+                <span>Seed</span>
+                <input
+                  type="number"
+                  value={options.textureSeed}
+                  disabled={options.mode === "meshOnly" || options.textureSeedMode === "randomize"}
+                  onChange={(event) =>
+                    setOptions((current) => ({ ...current, textureSeed: Number(event.target.value) || current.textureSeed }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Mode</span>
+                <select
+                  value={options.textureSeedMode}
+                  disabled={options.mode === "meshOnly"}
+                  onChange={(event) =>
+                    setOptions((current) => ({ ...current, textureSeedMode: event.target.value as SeedMode }))
+                  }
+                >
+                  <option value="randomize">Random</option>
+                  <option value="fixed">Fixed</option>
+                </select>
               </label>
             </div>
             <div className="split-fields">
@@ -1357,7 +1442,7 @@ function App() {
                     key={modelUrl}
                     src={modelUrl}
                     camera-controls
-                    auto-rotate
+                    auto-rotate={!busy}
                     rotation-per-second="28deg"
                     shadow-intensity="0.8"
                     exposure="1"

@@ -42,7 +42,7 @@ WHEEL_SOURCE_URL = "https://github.com/visualbruno/ComfyUI-Hunyuan3d-2-1/archive
 REALESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
 MODEL_REPO = "tencent/Hunyuan3D-2.1"
 DINO_REPO = "facebook/dinov2-giant"
-ENV_MARKER = ".ih3d-env-v3-ready"
+ENV_MARKER = ".ih3d-env-v4-ready"
 SOURCE_MARKER = ".ih3d-source-v1-ready"
 MODEL_MARKER = ".ih3d-models-v1-ready"
 WHEEL_MARKER = ".ih3d-texture-wheels-v1-ready"
@@ -99,7 +99,7 @@ HUNYUAN_RUNTIME_PACKAGES = [
     "configargparse==1.7",
     "tqdm==4.66.5",
     "psutil==6.0.0",
-    "onnxruntime==1.16.3",
+    "onnxruntime-gpu>=1.20.0",
     "torchmetrics==1.6.0",
     "timm",
     "torchdiffeq",
@@ -148,6 +148,17 @@ def emit(event_type: str, message: str | None = None, **payload: Any) -> None:
         event["message"] = message
     event.update(payload)
     print(json.dumps(event, ensure_ascii=True), flush=True)
+
+
+def emit_timing(stage: str, started: float, path: str | None = None) -> None:
+    elapsed_seconds = time.perf_counter() - started
+    payload: dict[str, Any] = {
+        "stage": stage,
+        "elapsedSeconds": round(elapsed_seconds, 3),
+    }
+    if path:
+        payload["path"] = path
+    emit("stage_timing", f"{stage} finished in {format_elapsed(elapsed_seconds)}", **payload)
 
 
 def app_paths(app_data_dir: Path, pytorch_profile: Any = None) -> dict[str, Path]:
@@ -554,6 +565,145 @@ def ensure_source(paths: dict[str, Path]) -> Path:
 
 
 def patch_hunyuan_source(source_dir: Path) -> None:
+    rembg_source = source_dir / "hy3dshape" / "hy3dshape" / "rembg.py"
+    if rembg_source.is_file():
+        content = rembg_source.read_text(encoding="utf-8")
+        original = content
+        if "def preferred_onnx_providers" not in content:
+            content = content.replace(
+                "from rembg import remove, new_session\n",
+                "from rembg import remove, new_session\n"
+                "\n"
+                "\n"
+                "def preferred_onnx_providers():\n"
+                "    try:\n"
+                "        import onnxruntime as ort\n"
+                "        available = ort.get_available_providers()\n"
+                "    except Exception:\n"
+                "        return None\n"
+                "    if 'CUDAExecutionProvider' in available:\n"
+                "        return ['CUDAExecutionProvider', 'CPUExecutionProvider']\n"
+                "    return None\n",
+            )
+        if "providers = preferred_onnx_providers()" not in content:
+            content = content.replace(
+                "    def __init__(self):\n        self.session = new_session()",
+                "    def __init__(self):\n"
+                "        providers = preferred_onnx_providers()\n"
+                "        if providers:\n"
+                "            try:\n"
+                "                self.session = new_session(providers=providers)\n"
+                "                return\n"
+                "            except Exception:\n"
+                "                pass\n"
+                "        self.session = new_session()",
+            )
+        if content != original:
+            rembg_source.write_text(content, encoding="utf-8")
+            emit("setup", "Patched background remover to prefer ONNX CUDA")
+
+    image_super_utils = source_dir / "hy3dpaint" / "utils" / "image_super_utils.py"
+    if image_super_utils.is_file():
+        content = image_super_utils.read_text(encoding="utf-8")
+        original = content
+        content = content.replace(
+            "import numpy as np\nfrom PIL import Image",
+            "import numpy as np\nimport torch\nfrom PIL import Image",
+        )
+        if "def enhance_batch" not in content:
+            content = content.replace(
+                "    def __call__(self, image):\n"
+                "        output, _ = self.upsampler.enhance(np.array(image))\n"
+                "        output = Image.fromarray(output)\n"
+                "        return output",
+                "    def __call__(self, image):\n"
+                "        output, _ = self.upsampler.enhance(np.array(image))\n"
+                "        output = Image.fromarray(output)\n"
+                "        return output\n"
+                "\n"
+                "    def enhance_batch(self, images):\n"
+                "        if len(images) <= 1:\n"
+                "            return [self(image) for image in images]\n"
+                "        try:\n"
+                "            tensors = []\n"
+                "            for image in images:\n"
+                "                array = np.array(image).astype(np.float32) / 255.0\n"
+                "                tensor = torch.from_numpy(np.transpose(array, (2, 0, 1))).float()\n"
+                "                tensors.append(tensor)\n"
+                "            batch = torch.stack(tensors, dim=0).to(self.upsampler.device)\n"
+                "            if self.upsampler.half:\n"
+                "                batch = batch.half()\n"
+                "            with torch.no_grad():\n"
+                "                output = self.upsampler.model(batch)\n"
+                "            output = output.float().cpu().clamp_(0, 1).numpy()\n"
+                "            results = []\n"
+                "            for image_output in output:\n"
+                "                image_output = np.transpose(image_output, (1, 2, 0))\n"
+                "                image_output = (image_output * 255.0).round().astype(np.uint8)\n"
+                "                results.append(Image.fromarray(image_output))\n"
+                "            return results\n"
+                "        except Exception:\n"
+                "            return [self(image) for image in images]",
+            )
+        if content != original:
+            image_super_utils.write_text(content, encoding="utf-8")
+            emit("setup", "Patched RealESRGAN enhancer for batched views")
+
+    multiview_utils = source_dir / "hy3dpaint" / "utils" / "multiview_utils.py"
+    if multiview_utils.is_file():
+        content = multiview_utils.read_text(encoding="utf-8")
+        original = content
+        content = content.replace(
+            "    def __call__(self, images, conditions, prompt=None, custom_view_size=None, resize_input=False):\n"
+            "        pils = self.forward_one(\n"
+            "            images, conditions, prompt=prompt, custom_view_size=custom_view_size, resize_input=resize_input\n"
+            "        )",
+            "    def __call__(self, images, conditions, prompt=None, custom_view_size=None, resize_input=False, num_inference_steps=None, guidance_scale=None, seed=0):\n"
+            "        pils = self.forward_one(\n"
+            "            images,\n"
+            "            conditions,\n"
+            "            prompt=prompt,\n"
+            "            custom_view_size=custom_view_size,\n"
+            "            resize_input=resize_input,\n"
+            "            num_inference_steps=num_inference_steps,\n"
+            "            guidance_scale=guidance_scale,\n"
+            "            seed=seed,\n"
+            "        )",
+        )
+        content = content.replace(
+            "    def forward_one(self, input_images, control_images, prompt=None, custom_view_size=None, resize_input=False):\n"
+            "        self.seed_everything(0)",
+            "    def forward_one(self, input_images, control_images, prompt=None, custom_view_size=None, resize_input=False, num_inference_steps=None, guidance_scale=None, seed=0):\n"
+            "        self.seed_everything(seed)",
+        )
+        content = content.replace(
+            "        kwargs = dict(generator=torch.Generator(device=self.pipeline.device).manual_seed(0))",
+            "        kwargs = dict(generator=torch.Generator(device=self.pipeline.device).manual_seed(seed))",
+        )
+        content = content.replace(
+            "        mvd_image = self.pipeline(\n"
+            "            input_images[0:1],\n"
+            "            num_inference_steps=infer_steps_dict[self.pipeline.scheduler.__class__.__name__],\n"
+            "            prompt=prompt,\n"
+            "            sync_condition=sync_condition,\n"
+            "            guidance_scale=3.0,\n"
+            "            **kwargs,\n"
+            "        ).images",
+            "        steps = num_inference_steps or infer_steps_dict[self.pipeline.scheduler.__class__.__name__]\n"
+            "        guidance = 3.0 if guidance_scale is None else guidance_scale\n"
+            "        mvd_image = self.pipeline(\n"
+            "            input_images[0:1],\n"
+            "            num_inference_steps=steps,\n"
+            "            prompt=prompt,\n"
+            "            sync_condition=sync_condition,\n"
+            "            guidance_scale=guidance,\n"
+            "            **kwargs,\n"
+            "        ).images",
+        )
+        if content != original:
+            multiview_utils.write_text(content, encoding="utf-8")
+            emit("setup", "Patched texture diffusion options")
+
     mesh_utils = source_dir / "hy3dpaint" / "DifferentiableRenderer" / "mesh_utils.py"
     if mesh_utils.is_file():
         content = mesh_utils.read_text(encoding="utf-8")
@@ -604,6 +754,38 @@ def patch_hunyuan_source(source_dir: Path) -> None:
     content = content.replace(
         "from DifferentiableRenderer.mesh_utils import convert_obj_to_glb",
         "from convert_utils import create_glb_with_pbr_materials",
+    )
+    content = content.replace(
+        "        multiviews_pbr = self.models[\"multiview_model\"](\n"
+        "            image_style,\n"
+        "            normal_maps + position_maps,\n"
+        "            prompt=image_caption,\n"
+        "            custom_view_size=self.config.resolution,\n"
+        "            resize_input=True,\n"
+        "        )",
+        "        multiviews_pbr = self.models[\"multiview_model\"](\n"
+        "            image_style,\n"
+        "            normal_maps + position_maps,\n"
+        "            prompt=image_caption,\n"
+        "            custom_view_size=self.config.resolution,\n"
+        "            resize_input=True,\n"
+        "            num_inference_steps=getattr(self.config, \"texture_steps\", None),\n"
+        "            guidance_scale=getattr(self.config, \"texture_guidance\", None),\n"
+        "            seed=getattr(self.config, \"texture_seed\", 0),\n"
+        "        )",
+    )
+    content = content.replace(
+        "        for i in range(len(enhance_images[\"albedo\"])):\n"
+        "            enhance_images[\"albedo\"][i] = self.models[\"super_model\"](enhance_images[\"albedo\"][i])\n"
+        "            enhance_images[\"mr\"][i] = self.models[\"super_model\"](enhance_images[\"mr\"][i])",
+        "        super_model = self.models[\"super_model\"]\n"
+        "        if hasattr(super_model, \"enhance_batch\"):\n"
+        "            enhance_images[\"albedo\"] = super_model.enhance_batch(enhance_images[\"albedo\"])\n"
+        "            enhance_images[\"mr\"] = super_model.enhance_batch(enhance_images[\"mr\"])\n"
+        "        else:\n"
+        "            for i in range(len(enhance_images[\"albedo\"])):\n"
+        "                enhance_images[\"albedo\"][i] = super_model(enhance_images[\"albedo\"][i])\n"
+        "                enhance_images[\"mr\"][i] = super_model(enhance_images[\"mr\"][i])",
     )
     content = content.replace(
         '            convert_obj_to_glb(output_mesh_path, output_mesh_path.replace(".obj", ".glb"))\n'
@@ -735,6 +917,7 @@ def ensure_env(paths: dict[str, Path], source_dir: Path, pytorch_profile: str) -
         pip + ["install", "--upgrade", *HUNYUAN_RUNTIME_PACKAGES],
         "Installing Hunyuan inference dependencies",
     )
+    run_checked(pip + ["install", "--upgrade", "onnxruntime-gpu>=1.20.0"], "Installing GPU ONNX Runtime")
     run_checked(pip + ["install", "--upgrade", "numpy==1.26.4"], "Pinning compatible NumPy")
     install_texture_wheels(python_path, paths)
     ensure_pkg_resources(python_path)
@@ -905,6 +1088,55 @@ def texture_view_count(options: dict[str, Any]) -> int:
     return max(6, min(9, len(azimuths)))
 
 
+def texture_seed_value(options: dict[str, Any]) -> int:
+    return seed_value(options, "textureSeed", "textureSeedMode") % (2**32)
+
+
+def apply_texture_options(config: Any, options: dict[str, Any]) -> None:
+    config.texture_steps = as_int(options.get("textureSteps"), 15, 1, 100)
+    config.texture_guidance = as_float(options.get("textureGuidance"), 3.0, 0, 30)
+    config.texture_seed = texture_seed_value(options)
+    azimuths = parse_number_list(str(options.get("cameraAzimuths", "")), [0, 90, 180, 270, 0, 180])
+    elevations = parse_number_list(str(options.get("cameraElevations", "")), [0, 0, 0, 0, 90, -90])
+    weights = parse_number_list(str(options.get("viewWeights", "")), [1, 0.1, 0.5, 0.1, 0.05, 0.05])
+    count = min(len(azimuths), len(elevations), len(weights))
+    if count >= 1:
+        config.candidate_camera_azims = azimuths[:count]
+        config.candidate_camera_elevs = elevations[:count]
+        config.candidate_view_weights = weights[:count]
+
+
+def shape_cache_key(options: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        MODEL_REPO,
+        as_bool(options.get("enableFlashVdm"), True),
+        str(options.get("mcAlgo", "mc")) or "mc",
+        as_bool(options.get("forceOffload"), False),
+        as_bool(options.get("compileModels"), False),
+    )
+
+
+def paint_cache_key(options: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        texture_view_count(options),
+        as_int(options.get("textureViewSize"), 512, 256, 2048),
+        as_int(options.get("textureSize"), 4096, 512, 8192),
+    )
+
+
+def maybe_compile_shape_pipeline(shape_pipeline: Any, torch: Any) -> None:
+    if getattr(shape_pipeline, "_ih3d_compiled", False):
+        return
+    started = time.perf_counter()
+    try:
+        if hasattr(shape_pipeline, "model"):
+            shape_pipeline.model = torch.compile(shape_pipeline.model, mode="reduce-overhead", dynamic=False)
+            shape_pipeline._ih3d_compiled = True
+            emit_timing("Shape model compile", started)
+    except Exception as error:
+        emit("setup", f"Torch compile skipped: {error}")
+
+
 def output_base_name(options: dict[str, Any], input_path: Path, index: int, total: int) -> str:
     requested = str(options.get("outputName", "")).strip()
     if not requested:
@@ -923,17 +1155,32 @@ def image_has_alpha(path: Path) -> bool:
         return alpha.getextrema()[0] < 255
 
 
-def load_condition_image(path: Path):
+def configure_torch_performance(torch: Any) -> None:
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.benchmark = True
+        emit("setup", "Enabled TF32 matmul and cuDNN autotuning")
+    except Exception as error:
+        emit("setup", f"Torch performance tuning skipped: {error}")
+
+
+def load_condition_image(path: Path, rembg: Any | None = None):
     from PIL import Image
 
     image = Image.open(path)
     if image.mode == "RGBA" and image_has_alpha(path):
-        return image.convert("RGBA")
+        return image.convert("RGBA"), rembg
     from hy3dshape.rembg import BackgroundRemover
 
+    started = time.perf_counter()
     emit("stage_start", f"Removing background for {path.name}", path=str(path))
-    rembg = BackgroundRemover()
-    return rembg(image.convert("RGB"))
+    if rembg is None:
+        rembg = BackgroundRemover()
+    result = rembg(image.convert("RGB"))
+    emit_timing("Background removal", started, path=str(path))
+    return result, rembg
 
 
 def find_existing_output(*paths: Path) -> list[str]:
@@ -959,6 +1206,16 @@ def cleanup_job_scratch(jobs_dir: Path, keep: Path | None = None) -> None:
             continue
 
 
+PIPELINE_CACHE: dict[str, Any] = {
+    "shape_key": None,
+    "shape_pipeline": None,
+    "paint_key": None,
+    "paint_pipeline": None,
+    "background_remover": None,
+    "torch_configured": False,
+}
+
+
 def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     source_dir = paths["source_dir"]
     launch_cwd = Path.cwd()
@@ -977,6 +1234,10 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     import torch
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
     from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
+
+    if not PIPELINE_CACHE.get("torch_configured"):
+        configure_torch_performance(torch)
+        PIPELINE_CACHE["torch_configured"] = True
 
     options = job.get("options", {})
     mode = str(options.get("mode", "meshTexture"))
@@ -997,24 +1258,67 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     try:
         shape_pipeline = None
         if mode != "textureOnly":
-            emit("model", "Loading Hunyuan3D shape model on CUDA")
-            shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(MODEL_REPO)
+            key = shape_cache_key(options)
+            shape_pipeline = PIPELINE_CACHE.get("shape_pipeline") if PIPELINE_CACHE.get("shape_key") == key else None
+            if shape_pipeline is None:
+                model_started = time.perf_counter()
+                emit("model", "Loading Hunyuan3D shape model on CUDA")
+                shape_pipeline = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(MODEL_REPO)
+                PIPELINE_CACHE["shape_pipeline"] = shape_pipeline
+                PIPELINE_CACHE["shape_key"] = key
+                emit_timing("Shape model load", model_started)
+            else:
+                emit("model", "Reusing loaded Hunyuan3D shape model")
+            if as_bool(options.get("enableFlashVdm"), False):
+                flash_started = time.perf_counter()
+                if getattr(shape_pipeline, "_ih3d_flashvdm_enabled", False):
+                    pass
+                elif hasattr(shape_pipeline, "enable_flashvdm"):
+                    try:
+                        shape_pipeline.enable_flashvdm(
+                            enabled=True,
+                            adaptive_kv_selection=False,
+                            mc_algo=str(options.get("mcAlgo", "mc")) or "mc",
+                            replace_vae=False,
+                        )
+                        shape_pipeline._ih3d_flashvdm_enabled = True
+                        emit_timing("FlashVDM setup", flash_started)
+                    except Exception as error:
+                        emit("setup", f"FlashVDM setup skipped: {error}")
+                else:
+                    emit("setup", "FlashVDM setup skipped: upstream pipeline does not expose enable_flashvdm")
             if as_bool(options.get("forceOffload"), False) and hasattr(shape_pipeline, "enable_model_cpu_offload"):
-                shape_pipeline.enable_model_cpu_offload()
+                if not getattr(shape_pipeline, "_ih3d_cpu_offload_enabled", False):
+                    shape_pipeline.enable_model_cpu_offload()
+                    shape_pipeline._ih3d_cpu_offload_enabled = True
+            if as_bool(options.get("compileModels"), False):
+                maybe_compile_shape_pipeline(shape_pipeline, torch)
 
         paint_pipeline = None
         if mode != "meshOnly":
-            emit("model", "Loading Hunyuan3D PBR texture model on CUDA")
-            max_num_view = texture_view_count(options)
-            resolution = as_int(options.get("textureViewSize"), 512, 256, 2048)
-            config = Hunyuan3DPaintConfig(max_num_view, resolution)
-            config.realesrgan_ckpt_path = str(source_dir / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth")
-            config.multiview_cfg_path = str(source_dir / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml")
-            config.custom_pipeline = str(source_dir / "hy3dpaint" / "hunyuanpaintpbr")
-            if hasattr(config, "texture_size"):
-                config.texture_size = as_int(options.get("textureSize"), getattr(config, "texture_size"), 512, 8192)
-            paint_pipeline = Hunyuan3DPaintPipeline(config)
+            key = paint_cache_key(options)
+            paint_pipeline = PIPELINE_CACHE.get("paint_pipeline") if PIPELINE_CACHE.get("paint_key") == key else None
+            if paint_pipeline is None:
+                model_started = time.perf_counter()
+                emit("model", "Loading Hunyuan3D PBR texture model on CUDA")
+                max_num_view = texture_view_count(options)
+                resolution = as_int(options.get("textureViewSize"), 512, 256, 2048)
+                config = Hunyuan3DPaintConfig(max_num_view, resolution)
+                config.realesrgan_ckpt_path = str(source_dir / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth")
+                config.multiview_cfg_path = str(source_dir / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml")
+                config.custom_pipeline = str(source_dir / "hy3dpaint" / "hunyuanpaintpbr")
+                if hasattr(config, "texture_size"):
+                    config.texture_size = as_int(options.get("textureSize"), getattr(config, "texture_size"), 512, 8192)
+                apply_texture_options(config, options)
+                paint_pipeline = Hunyuan3DPaintPipeline(config)
+                PIPELINE_CACHE["paint_pipeline"] = paint_pipeline
+                PIPELINE_CACHE["paint_key"] = key
+                emit_timing("Texture model load", model_started)
+            else:
+                apply_texture_options(paint_pipeline.config, options)
+                emit("model", "Reusing loaded Hunyuan3D PBR texture model")
 
+        background_remover = PIPELINE_CACHE.get("background_remover")
         for index, image_path in enumerate(input_paths):
             image_started = time.perf_counter()
             emit("image_start", f"Processing {image_path.name}", path=str(image_path))
@@ -1029,9 +1333,11 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
 
                 if mode != "textureOnly":
                     assert shape_pipeline is not None
-                    image = load_condition_image(image_path)
+                    image, background_remover = load_condition_image(image_path, background_remover)
+                    PIPELINE_CACHE["background_remover"] = background_remover
                     seed = seed_value(options, "meshSeed", "meshSeedMode")
                     generator = torch.Generator(device="cuda").manual_seed(seed % (2**32))
+                    stage_started = time.perf_counter()
                     emit("stage_start", f"Generating mesh for {image_path.name}", path=str(image_path))
                     meshes = shape_pipeline(
                         image=image,
@@ -1045,8 +1351,11 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                         num_chunks=as_int(options.get("numChunks"), 8000, 1024, 999999),
                         enable_pbar=False,
                     )
+                    emit_timing("Mesh generation", stage_started, path=str(image_path))
                     mesh = meshes[0]
+                    export_started = time.perf_counter()
                     mesh.export(intermediate_mesh)
+                    emit_timing("Mesh export", export_started, path=str(image_path))
                     emit("stage_done", f"Mesh generated for {image_path.name}", path=str(image_path))
 
                 if mode == "meshOnly":
@@ -1062,6 +1371,7 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                     if not mesh_source.is_file():
                         raise RuntimeError(f"Source mesh was not found: {mesh_source}")
                     output_obj = final_mesh_path.with_suffix(".obj")
+                    stage_started = time.perf_counter()
                     emit("stage_start", f"Generating PBR texture for {image_path.name}", path=str(image_path))
                     result = paint_pipeline(
                         mesh_path=str(mesh_source),
@@ -1070,6 +1380,7 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                         use_remesh=False,
                         save_glb=True,
                     )
+                    emit_timing("Texture generation", stage_started, path=str(image_path))
                     result_path = Path(str(result)) if result else output_obj
                     glb_candidate = output_obj.with_suffix(".glb")
                     if glb_candidate.exists() and glb_candidate != final_mesh_path:
@@ -1108,6 +1419,7 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
             emit("done", f"Batch finished in {batch_elapsed}.", failedCount=0, totalCount=total)
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
+        os.chdir(launch_cwd)
 
 
 def run_managed_job(job: dict[str, Any]) -> None:
@@ -1120,6 +1432,8 @@ def run_managed_job(job: dict[str, Any]) -> None:
 
     action = str(job.get("action", "generate"))
     include_texture = action == "setup" or str(options.get("mode", "meshTexture")) != "meshOnly"
+    if paths["source_dir"].is_dir():
+        patch_hunyuan_source(paths["source_dir"])
     configure_cuda_device(options.get("cudaDevice", "auto"))
     ensure_models(paths, include_texture=include_texture)
 
@@ -1140,12 +1454,45 @@ def run_outer(job_path: Path) -> int:
     return reinvoke_inside_env(python_path, job_path, app_data_dir, paths)
 
 
+def run_daemon() -> int:
+    if os.environ.get("IH3D_IN_MANAGED_ENV") != "1":
+        emit("error", "Managed worker daemon must be launched inside the app Python environment.")
+        return 1
+    emit("daemon_ready", "Managed Hunyuan worker is ready.")
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        if line == "__shutdown__":
+            emit("daemon_exit", "Managed Hunyuan worker is shutting down.")
+            return 0
+        try:
+            request = json.loads(line)
+            job_path_value = request.get("jobPath") or request.get("job_path")
+            if not job_path_value:
+                raise RuntimeError("Daemon request did not include jobPath.")
+            job_path = Path(str(job_path_value))
+            with job_path.open("r", encoding="utf-8") as handle:
+                job = json.load(handle)
+            run_managed_job(job)
+        except KeyboardInterrupt:
+            emit("canceled", "Job canceled.")
+        except Exception as error:
+            emit("error", str(error), traceback=traceback.format_exc())
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--job", required=True, type=Path)
+    parser.add_argument("--job", type=Path)
+    parser.add_argument("--daemon", action="store_true")
     args = parser.parse_args()
 
     try:
+        if args.daemon:
+            return run_daemon()
+        if args.job is None:
+            parser.error("--job is required unless --daemon is used")
         if os.environ.get("IH3D_IN_MANAGED_ENV") == "1":
             with args.job.open("r", encoding="utf-8") as handle:
                 job = json.load(handle)

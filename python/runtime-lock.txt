@@ -3,7 +3,7 @@
 # Standalone direction:
 # - No repository .venv is used or committed.
 # - The app creates its own Python environment under the app data folder:
-#   %APPDATA%\public.image.to.hunyuan3d\python-env
+#   %APPDATA%\public.image.to.hunyuan3d\python-env-cu124 or python-env-cu128
 # - Source, model caches, jobs, and outputs also live under app data.
 #
 # First-run runtime plan:
@@ -19,6 +19,7 @@
 # - Model weights: tencent/Hunyuan3D-2.1
 # - Texture conditioning: facebook/dinov2-giant
 # - RealESRGAN: RealESRGAN_x4plus.pth from xinntao/Real-ESRGAN
+# - Background removal: rembg with onnxruntime-gpu preferred, CPU fallback
 #
 # The app installs a curated inference dependency set, not the full upstream
 # requirements.txt. The full file includes demo/API/training packages such as

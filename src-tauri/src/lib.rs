@@ -2,10 +2,10 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Cursor, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{ChildStdin, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -28,7 +28,7 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const EMBEDDED_WORKER: &str = include_str!("../../python/hunyuan_worker.py");
-const ENV_MARKER: &str = ".ih3d-env-v3-ready";
+const ENV_MARKER: &str = ".ih3d-env-v4-ready";
 const SOURCE_MARKER: &str = ".ih3d-source-v1-ready";
 const MODEL_MARKER: &str = ".ih3d-models-v1-ready";
 const WHEEL_MARKER: &str = ".ih3d-texture-wheels-v1-ready";
@@ -99,6 +99,7 @@ struct HunyuanOptions {
     mc_level: f32,
     mc_algo: String,
     enable_flash_vdm: bool,
+    compile_models: bool,
     force_offload: bool,
     remove_floaters: bool,
     remove_degenerate_faces: bool,
@@ -211,11 +212,104 @@ impl ActiveJobState {
         Ok(canceled)
     }
 
+    fn finish_current(&self) -> Result<Option<bool>, String> {
+        let mut active = self
+            .inner
+            .lock()
+            .map_err(|_| "Unable to lock active job state.".to_string())?;
+        let Some(job) = active.take() else {
+            return Ok(None);
+        };
+        Ok(Some(job.cancel_requested))
+    }
+
+    fn finish_if_pid(&self, pid: u32) -> Result<Option<bool>, String> {
+        let mut active = self
+            .inner
+            .lock()
+            .map_err(|_| "Unable to lock active job state.".to_string())?;
+        let Some(job) = active.as_ref() else {
+            return Ok(None);
+        };
+        if job.pid != pid {
+            return Ok(None);
+        }
+        let canceled = job.cancel_requested;
+        *active = None;
+        Ok(Some(canceled))
+    }
+
     fn active_job_id(&self) -> Result<Option<String>, String> {
         self.inner
             .lock()
             .map(|job| job.as_ref().map(|job| job.id.clone()))
             .map_err(|_| "Unable to lock active job state.".to_string())
+    }
+}
+
+#[derive(Clone, Default)]
+struct ManagedWorkerState {
+    inner: Arc<Mutex<Option<ManagedWorker>>>,
+}
+
+#[derive(Clone)]
+struct ManagedWorker {
+    pid: u32,
+    runtime_profile: String,
+    cuda_device: String,
+    stdin: Arc<Mutex<ChildStdin>>,
+}
+
+impl ManagedWorkerState {
+    fn get_matching(
+        &self,
+        runtime_profile: &str,
+        cuda_device: &str,
+    ) -> Result<Option<ManagedWorker>, String> {
+        self.inner
+            .lock()
+            .map(|worker| {
+                worker.as_ref().and_then(|worker| {
+                    if worker.runtime_profile == runtime_profile
+                        && worker.cuda_device == cuda_device
+                    {
+                        Some(worker.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .map_err(|_| "Unable to lock managed worker state.".to_string())
+    }
+
+    fn set(&self, worker: ManagedWorker) -> Result<(), String> {
+        self.inner
+            .lock()
+            .map(|mut current| *current = Some(worker))
+            .map_err(|_| "Unable to lock managed worker state.".to_string())
+    }
+
+    fn clear_if_pid(&self, pid: u32) -> Result<(), String> {
+        self.inner
+            .lock()
+            .map(|mut worker| {
+                if worker.as_ref().is_some_and(|worker| worker.pid == pid) {
+                    *worker = None;
+                }
+            })
+            .map_err(|_| "Unable to lock managed worker state.".to_string())
+    }
+
+    fn stop(&self) -> Result<(), String> {
+        let worker = self
+            .inner
+            .lock()
+            .map_err(|_| "Unable to lock managed worker state.".to_string())?
+            .take();
+        if let Some(worker) = worker {
+            let _ = kill_process_tree(worker.pid);
+        }
+        Ok(())
     }
 }
 
@@ -351,7 +445,8 @@ fn default_hunyuan_options() -> HunyuanOptions {
         num_chunks: 8000,
         mc_level: 0.0,
         mc_algo: "mc".to_string(),
-        enable_flash_vdm: false,
+        enable_flash_vdm: true,
+        compile_models: false,
         force_offload: false,
         remove_floaters: true,
         remove_degenerate_faces: true,
@@ -359,7 +454,7 @@ fn default_hunyuan_options() -> HunyuanOptions {
         max_faces: 15000,
         smooth_normals: true,
         texture_view_size: 512,
-        texture_steps: 10,
+        texture_steps: 15,
         texture_guidance: 3.0,
         texture_size: 4096,
         texture_seed: 802344256,
@@ -552,6 +647,25 @@ fn configure_worker_command(command: &mut Command) {
     {
         command.process_group(0);
     }
+}
+
+fn configure_managed_worker_env(
+    command: &mut Command,
+    app_data: &Path,
+    source: &Path,
+    models: &Path,
+) {
+    command
+        .env("IH3D_IN_MANAGED_ENV", "1")
+        .env("IH3D_SOURCE_DIR", source)
+        .env("IH3D_APP_DATA_DIR", app_data)
+        .env("HF_HOME", models.join("huggingface"))
+        .env("HF_HUB_CACHE", models.join("huggingface").join("hub"))
+        .env(
+            "TRANSFORMERS_CACHE",
+            models.join("huggingface").join("transformers"),
+        )
+        .env("XFORMERS_FORCE_DISABLE_TRITON", "1");
 }
 
 fn kill_process_tree(pid: u32) -> Result<(), String> {
@@ -812,12 +926,35 @@ fn preview_image_data_url(path: String) -> Result<String, String> {
     if !image_path.is_file() {
         return Err("Preview image was not found.".to_string());
     }
+    if let Ok(data_url) = preview_thumbnail_data_url(&image_path) {
+        return Ok(data_url);
+    }
+
     let mime_type = image_mime_type(&image_path)?;
     let bytes =
         fs::read(&image_path).map_err(|error| format!("Unable to read preview image: {error}"))?;
     Ok(format!(
         "data:{mime_type};base64,{}",
         general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn preview_thumbnail_data_url(image_path: &Path) -> Result<String, String> {
+    let image = image::ImageReader::open(image_path)
+        .map_err(|error| format!("Unable to open preview image: {error}"))?
+        .with_guessed_format()
+        .map_err(|error| format!("Unable to detect preview format: {error}"))?
+        .decode()
+        .map_err(|error| format!("Unable to decode preview image: {error}"))?;
+    let thumbnail = image.thumbnail(512, 512).to_rgb8();
+    let mut encoded = Cursor::new(Vec::new());
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 84);
+    encoder
+        .encode_image(&thumbnail)
+        .map_err(|error| format!("Unable to encode preview thumbnail: {error}"))?;
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        general_purpose::STANDARD.encode(encoded.into_inner())
     ))
 }
 
@@ -867,9 +1004,118 @@ fn open_output_folder(app: AppHandle) -> Result<(), String> {
         .map_err(|error| format!("Unable to open output folder: {error}"))
 }
 
+fn ensure_managed_worker(
+    app: &AppHandle,
+    active_jobs: &ActiveJobState,
+    managed_workers: &ManagedWorkerState,
+    options: &HunyuanOptions,
+) -> Result<ManagedWorker, String> {
+    let runtime_profile = normalize_runtime_profile(&options.runtime_profile);
+    let cuda_device = options.cuda_device.clone();
+    if let Some(worker) = managed_workers.get_matching(&runtime_profile, &cuda_device)? {
+        return Ok(worker);
+    }
+    managed_workers.stop()?;
+
+    let env = env_dir_for_profile(app, &runtime_profile)?;
+    let worker_path = worker_path(app)?;
+    let app_data = app_data_dir(app)?;
+    let mut command = Command::new(env_python_path(&env));
+    configure_worker_command(&mut command);
+    configure_managed_worker_env(&mut command, &app_data, &source_dir(app)?, &model_dir(app)?);
+    command
+        .arg(worker_path)
+        .arg("--daemon")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Unable to start managed Hunyuan worker: {error}"))?;
+    let pid = child.id();
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Unable to open managed worker stdin.".to_string())?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let worker = ManagedWorker {
+        pid,
+        runtime_profile,
+        cuda_device,
+        stdin: Arc::new(Mutex::new(stdin)),
+    };
+    managed_workers.set(worker.clone())?;
+
+    let app_for_stdout = app.clone();
+    let app_for_stderr = app.clone();
+    let app_for_wait = app.clone();
+    let active_jobs_for_stdout = active_jobs.clone();
+    let active_jobs_for_wait = active_jobs.clone();
+    let managed_workers_for_wait = managed_workers.clone();
+    thread::spawn(move || {
+        if let Some(stdout) = stdout {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                    let event_type = value
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    let completes_job = matches!(event_type, "done" | "error" | "canceled");
+                    let _ = app_for_stdout.emit("hunyuan-worker-event", value);
+                    if completes_job {
+                        let _ = active_jobs_for_stdout.finish_current();
+                    }
+                } else {
+                    let _ = app_for_stdout.emit(
+                        "hunyuan-worker-event",
+                        serde_json::json!({ "type": "setup", "message": line }),
+                    );
+                }
+            }
+        }
+    });
+
+    thread::spawn(move || {
+        if let Some(stderr) = stderr {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                let _ = app_for_stderr.emit(
+                    "hunyuan-worker-event",
+                    serde_json::json!({ "type": "setup", "message": line }),
+                );
+            }
+        }
+    });
+
+    thread::spawn(move || {
+        let status = child.wait();
+        let _ = managed_workers_for_wait.clear_if_pid(pid);
+        let active = active_jobs_for_wait.finish_if_pid(pid).unwrap_or(None);
+        if let Some(was_canceled) = active {
+            if was_canceled {
+                let _ = app_for_wait.emit(
+                    "hunyuan-worker-event",
+                    serde_json::json!({ "type": "canceled", "message": "Job canceled." }),
+                );
+            } else if !matches!(status, Ok(status) if status.success()) {
+                let _ = app_for_wait.emit(
+                    "hunyuan-worker-event",
+                    serde_json::json!({ "type": "error", "message": "Managed Hunyuan worker exited with an error." }),
+                );
+            }
+        }
+    });
+
+    Ok(worker)
+}
+
 fn start_worker_job_core(
     app: AppHandle,
     active_jobs: ActiveJobState,
+    managed_workers: ManagedWorkerState,
     action: &str,
     paths: Vec<String>,
     mut options: HunyuanOptions,
@@ -887,13 +1133,11 @@ fn start_worker_job_core(
         return Err("Texture-only mode needs a source GLB mesh.".to_string());
     }
 
-    let python = find_python().ok_or_else(|| {
-        "Python 3.10, 3.11, or 3.12 was not found. Install Python and try again.".to_string()
-    })?;
     let worker = worker_path(&app)?;
     let app_data = app_data_dir(&app)?;
     let jobs = jobs_dir(&app)?;
     normalize_options_for_job(&mut options)?;
+    let requested_profile = normalize_runtime_profile(&options.runtime_profile);
 
     let job_id = Uuid::new_v4().to_string();
     let job_path = jobs.join(format!("{job_id}.json"));
@@ -908,8 +1152,41 @@ fn start_worker_job_core(
         .map_err(|error| format!("Unable to serialize job: {error}"))?;
     fs::write(&job_path, job_json).map_err(|error| format!("Unable to write job: {error}"))?;
 
-    let mut command = command_from_python_spec(&python);
+    if action == "generate" {
+        let worker = ensure_managed_worker(&app, &active_jobs, &managed_workers, &job.options)?;
+        active_jobs.start(job_id.clone(), worker.pid)?;
+        let request = serde_json::json!({ "jobPath": job_path.display().to_string() }).to_string();
+        let mut stdin = worker
+            .stdin
+            .lock()
+            .map_err(|_| "Unable to lock managed worker stdin.".to_string())?;
+        if let Err(error) = writeln!(stdin, "{request}") {
+            let _ = active_jobs.finish(&job_id);
+            let _ = managed_workers.clear_if_pid(worker.pid);
+            let _ = kill_process_tree(worker.pid);
+            return Err(format!("Unable to send job to managed worker: {error}"));
+        }
+        return Ok(job_id);
+    }
+
+    let mut command = if action == "generate" {
+        let env = env_dir_for_profile(&app, &requested_profile)?;
+        Command::new(env_python_path(&env))
+    } else {
+        let python = find_python().ok_or_else(|| {
+            "Python 3.10, 3.11, or 3.12 was not found. Install Python and try again.".to_string()
+        })?;
+        command_from_python_spec(&python)
+    };
     configure_worker_command(&mut command);
+    if action == "generate" {
+        configure_managed_worker_env(
+            &mut command,
+            &app_data,
+            &source_dir(&app)?,
+            &model_dir(&app)?,
+        );
+    }
     command
         .arg(worker)
         .arg("--job")
@@ -992,31 +1269,59 @@ fn start_worker_job_core(
 fn start_worker_job(
     app: AppHandle,
     active_jobs: State<'_, ActiveJobState>,
+    managed_workers: State<'_, ManagedWorkerState>,
     action: &str,
     paths: Vec<String>,
     options: HunyuanOptions,
 ) -> Result<String, String> {
-    start_worker_job_core(app, active_jobs.inner().clone(), action, paths, options)
+    start_worker_job_core(
+        app,
+        active_jobs.inner().clone(),
+        managed_workers.inner().clone(),
+        action,
+        paths,
+        options,
+    )
 }
 
 #[tauri::command]
 fn prepare_runtime(
     app: AppHandle,
     active_jobs: State<'_, ActiveJobState>,
+    managed_workers: State<'_, ManagedWorkerState>,
     options: HunyuanOptions,
 ) -> Result<String, String> {
-    start_worker_job(app, active_jobs, "setup", Vec::new(), options)
+    if active_jobs.is_busy()? {
+        return Err("Wait for the current job to finish before preparing the runtime.".to_string());
+    }
+    managed_workers.stop()?;
+    start_worker_job(
+        app,
+        active_jobs,
+        managed_workers,
+        "setup",
+        Vec::new(),
+        options,
+    )
 }
 
 #[tauri::command]
 fn start_hunyuan_job(
     app: AppHandle,
     active_jobs: State<'_, ActiveJobState>,
+    managed_workers: State<'_, ManagedWorkerState>,
     paths: Vec<String>,
     options: HunyuanOptions,
 ) -> Result<String, String> {
     runtime_ready_for_generation(&app, &options)?;
-    start_worker_job(app, active_jobs, "generate", paths, options)
+    start_worker_job(
+        app,
+        active_jobs,
+        managed_workers,
+        "generate",
+        paths,
+        options,
+    )
 }
 
 #[tauri::command]
@@ -1029,11 +1334,13 @@ fn cancel_active_job(active_jobs: State<'_, ActiveJobState>) -> Result<(), Strin
 fn reset_python_runtime(
     app: AppHandle,
     active_jobs: State<'_, ActiveJobState>,
+    managed_workers: State<'_, ManagedWorkerState>,
     runtime_profile: Option<String>,
 ) -> Result<RuntimeStatus, String> {
     if active_jobs.is_busy()? {
         return Err("Wait for the current job to finish before resetting the runtime.".to_string());
     }
+    managed_workers.stop()?;
     let requested_profile = normalize_runtime_profile(
         runtime_profile
             .as_deref()
@@ -1251,6 +1558,7 @@ fn handle_agent_route(
     request: HttpRequest,
     app: &AppHandle,
     active_jobs: &ActiveJobState,
+    managed_workers: &ManagedWorkerState,
     agent_state: &AgentServerState,
 ) -> Result<serde_json::Value, String> {
     match (request.method.as_str(), request.path.as_str()) {
@@ -1273,11 +1581,18 @@ fn handle_agent_route(
             serde_json::to_value(get_vram_status()).map_err(|error| error.to_string())
         }
         ("POST", "/prepare") => {
+            if active_jobs.is_busy()? {
+                return Err(
+                    "Wait for the current job to finish before preparing the runtime.".to_string(),
+                );
+            }
             let request = parse_agent_job_request(&request.body)?;
             let options = agent_options_from_request(request.options)?;
+            managed_workers.stop()?;
             let job_id = start_worker_job_core(
                 app.clone(),
                 active_jobs.clone(),
+                managed_workers.clone(),
                 "setup",
                 Vec::new(),
                 options,
@@ -1292,6 +1607,7 @@ fn handle_agent_route(
             let job_id = start_worker_job_core(
                 app.clone(),
                 active_jobs.clone(),
+                managed_workers.clone(),
                 "generate",
                 paths,
                 options,
@@ -1304,6 +1620,7 @@ fn handle_agent_route(
                     "Wait for the current job to finish before resetting the runtime.".to_string(),
                 );
             }
+            managed_workers.stop()?;
             let request = parse_agent_job_request(&request.body)?;
             let options = agent_options_from_request(request.options)?;
             let runtime_profile = normalize_runtime_profile(&options.runtime_profile);
@@ -1330,13 +1647,14 @@ fn handle_agent_stream(
     mut stream: TcpStream,
     app: &AppHandle,
     active_jobs: &ActiveJobState,
+    managed_workers: &ManagedWorkerState,
     agent_state: &AgentServerState,
 ) {
     let result = read_http_request(&mut stream).and_then(|request| {
         if request.method == "OPTIONS" {
             return write_empty_response(&mut stream, "204 No Content");
         }
-        match handle_agent_route(request, app, active_jobs, agent_state) {
+        match handle_agent_route(request, app, active_jobs, managed_workers, agent_state) {
             Ok(payload) => write_json_response(&mut stream, "200 OK", payload),
             Err(error) => write_json_response(
                 &mut stream,
@@ -1358,13 +1676,16 @@ fn run_agent_server(
     listener: TcpListener,
     app: AppHandle,
     active_jobs: ActiveJobState,
+    managed_workers: ManagedWorkerState,
     agent_state: AgentServerState,
     stop: Arc<AtomicBool>,
 ) {
     let _ = listener.set_nonblocking(true);
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((stream, _)) => handle_agent_stream(stream, &app, &active_jobs, &agent_state),
+            Ok((stream, _)) => {
+                handle_agent_stream(stream, &app, &active_jobs, &managed_workers, &agent_state)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(80));
             }
@@ -1387,6 +1708,7 @@ fn set_agent_server_enabled_inner(
     app: AppHandle,
     agent_state: &AgentServerState,
     active_jobs: &ActiveJobState,
+    managed_workers: &ManagedWorkerState,
     enabled: bool,
     port: Option<u16>,
 ) -> Result<AgentServerStatus, String> {
@@ -1412,9 +1734,19 @@ fn set_agent_server_enabled_inner(
             thread::spawn({
                 let app = app.clone();
                 let active_jobs = active_jobs.clone();
+                let managed_workers = managed_workers.clone();
                 let agent_state = agent_state.clone();
                 let stop = stop.clone();
-                move || run_agent_server(listener, app, active_jobs, agent_state, stop)
+                move || {
+                    run_agent_server(
+                        listener,
+                        app,
+                        active_jobs,
+                        managed_workers,
+                        agent_state,
+                        stop,
+                    )
+                }
             });
             control.enabled = true;
             control.stop = Some(stop);
@@ -1429,10 +1761,18 @@ fn set_agent_server_enabled(
     app: AppHandle,
     agent_state: State<'_, AgentServerState>,
     active_jobs: State<'_, ActiveJobState>,
+    managed_workers: State<'_, ManagedWorkerState>,
     enabled: bool,
     port: Option<u16>,
 ) -> Result<AgentServerStatus, String> {
-    set_agent_server_enabled_inner(app, agent_state.inner(), active_jobs.inner(), enabled, port)
+    set_agent_server_enabled_inner(
+        app,
+        agent_state.inner(),
+        active_jobs.inner(),
+        managed_workers.inner(),
+        enabled,
+        port,
+    )
 }
 
 fn agent_api_autostart_requested() -> bool {
@@ -1451,6 +1791,7 @@ fn agent_api_autostart_port() -> Option<u16> {
 pub fn run() {
     tauri::Builder::default()
         .manage(ActiveJobState::default())
+        .manage(ManagedWorkerState::default())
         .manage(AgentServerState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -1459,10 +1800,12 @@ pub fn run() {
                 let handle = app.handle().clone();
                 let agent_state = app.state::<AgentServerState>().inner().clone();
                 let active_jobs = app.state::<ActiveJobState>().inner().clone();
+                let managed_workers = app.state::<ManagedWorkerState>().inner().clone();
                 if let Err(error) = set_agent_server_enabled_inner(
                     handle,
                     &agent_state,
                     &active_jobs,
+                    &managed_workers,
                     true,
                     agent_api_autostart_port(),
                 ) {
