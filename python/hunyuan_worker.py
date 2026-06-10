@@ -937,7 +937,6 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                 )
                 mesh = meshes[0]
                 mesh.export(intermediate_mesh)
-                outputs.append(str(intermediate_mesh.resolve()))
                 emit("stage_done", f"Mesh saved: {intermediate_mesh.name}", path=str(image_path), output=str(intermediate_mesh))
 
             if mode == "meshOnly":

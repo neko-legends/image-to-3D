@@ -153,7 +153,7 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.6.14";
+const APP_VERSION = "v26.6.15";
 const SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
 const AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
 
@@ -199,6 +199,7 @@ const isTauriRuntime = () => "__TAURI_INTERNALS__" in window || "__TAURI__" in w
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 const isModelFile = (path: string) => /\.(glb|gltf|obj|ply)$/i.test(path);
 const isPreviewableImage = (path: string) => /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(path);
+const isTemporaryJobOutput = (path: string) => /[\\/]jobs[\\/]/i.test(path);
 
 function coerceBoolean(value: unknown, fallback: boolean) {
   return typeof value === "boolean" ? value : fallback;
@@ -317,6 +318,22 @@ function parseOutputPaths(output?: string, outputs?: string[]) {
   );
 }
 
+function choosePreviewModel(paths?: string[]) {
+  const models = paths?.filter(isModelFile) ?? [];
+  return models.find((path) => !isTemporaryJobOutput(path)) ?? models[0];
+}
+
+function orderOutputPaths(paths: string[]) {
+  return [...paths].sort((left, right) => {
+    const leftTemp = isTemporaryJobOutput(left) ? 1 : 0;
+    const rightTemp = isTemporaryJobOutput(right) ? 1 : 0;
+    if (leftTemp !== rightTemp) return leftTemp - rightTemp;
+    const leftModel = isModelFile(left) ? 0 : 1;
+    const rightModel = isModelFile(right) ? 0 : 1;
+    return leftModel - rightModel;
+  });
+}
+
 function runtimeReady(runtime: RuntimeStatus | null, options?: HunyuanOptions) {
   const profileReady = !options || runtime?.envRuntimeProfile === options.runtimeProfile;
   return Boolean(runtime?.envReady && runtime.sourceReady && runtime.modelsReady && profileReady);
@@ -391,7 +408,7 @@ function App() {
     [queue, selectedPath]
   );
   const selectedModel = useMemo(
-    () => selectedItem?.outputHistory?.find(isModelFile),
+    () => choosePreviewModel(selectedItem?.outputHistory),
     [selectedItem]
   );
   const modelUrl = useMemo(
@@ -570,7 +587,7 @@ function App() {
         setHeadline(payload.message ?? "Working");
       }
       if (payload.type === "image_done" && payload.path) {
-        const outputs = parseOutputPaths(payload.output, payload.outputs);
+        const outputs = orderOutputPaths(parseOutputPaths(payload.output, payload.outputs));
         setQueue((current) =>
           current.map((item) =>
             item.path === payload.path
@@ -1156,6 +1173,7 @@ function App() {
               <div className="model-frame">
                 {modelUrl ? (
                   <model-viewer
+                    key={modelUrl}
                     src={modelUrl}
                     camera-controls
                     auto-rotate
