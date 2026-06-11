@@ -14,6 +14,7 @@ import {
   Loader2,
   PackageOpen,
   Play,
+  Power,
   RefreshCw,
   RotateCcw,
   Settings2,
@@ -161,7 +162,7 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.6.20";
+const APP_VERSION = "v26.6.21";
 const SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v3";
 const LEGACY_SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
 const AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
@@ -362,6 +363,21 @@ function runtimeProfileLabel(profile: string) {
   return profile || "not installed";
 }
 
+function gpuComputeCapability(gpu: GpuVram) {
+  const value = Number(gpu.computeCap);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function isRtx50Gpu(gpu: GpuVram) {
+  return gpuComputeCapability(gpu) >= 12 || /\bRTX\s*50|5090|5080|5070/i.test(gpu.name);
+}
+
+function selectedCudaGpu(vram: VramStatus | null, cudaDevice: string) {
+  if (!vram?.available) return null;
+  if (cudaDevice === "auto") return vram.gpus.find(isRtx50Gpu) ?? null;
+  return vram.gpus.find((gpu) => gpu.index === cudaDevice) ?? null;
+}
+
 function statusIcon(status: QueueStatus) {
   if (status === "done") return <CheckCircle2 size={18} />;
   if (status === "error" || status === "canceled") return <XCircle size={18} />;
@@ -466,6 +482,11 @@ function App() {
   const [log, setLog] = useState<string[]>([]);
 
   const vramDisplay = useMemo(() => formatVram(vram), [vram]);
+  const rtx50RecommendationGpu = useMemo(
+    () => selectedCudaGpu(vram, options.cudaDevice),
+    [options.cudaDevice, vram]
+  );
+  const shouldRecommendCu128 = Boolean(rtx50RecommendationGpu && options.runtimeProfile !== "cu128");
   const completeCount = useMemo(() => queue.filter((item) => item.status === "done").length, [queue]);
   const errorCount = useMemo(() => queue.filter((item) => item.status === "error").length, [queue]);
   const selectedItem = useMemo(
@@ -832,6 +853,19 @@ function App() {
       pushLog(String(error));
     }
   }, [busy, options.runtimeProfile, pushLog]);
+
+  const unloadModels = useCallback(async () => {
+    if (!isTauriRuntime() || busy) return;
+    try {
+      const status = await invoke<RuntimeStatus>("unload_models", { runtimeProfile: options.runtimeProfile });
+      setRuntime(status);
+      void refreshVram().catch(() => undefined);
+      setHeadline("Loaded models unloaded");
+      pushLog("Unloaded warm Hunyuan models. The next generation will reload them.");
+    } catch (error) {
+      pushLog(String(error));
+    }
+  }, [busy, options.runtimeProfile, pushLog, refreshVram]);
 
   const chooseMeshInput = useCallback(async () => {
     const selected = await openDialog({
@@ -1584,6 +1618,20 @@ function App() {
                   </select>
                 </label>
               </div>
+              {shouldRecommendCu128 && rtx50RecommendationGpu ? (
+                <div className="runtime-recommendation">
+                  <span>
+                    {rtx50RecommendationGpu.name} detected. CUDA 12.8 is recommended for RTX 50 GPUs.
+                  </span>
+                  <button
+                    className="secondary mini-action"
+                    disabled={busy}
+                    onClick={() => setOptions((current) => ({ ...current, runtimeProfile: "cu128" }))}
+                  >
+                    Use CUDA 12.8
+                  </button>
+                </div>
+              ) : null}
               <div className="runtime-status">
                 <p className={runtime?.nvidiaGpuFound ? "ok" : "warn"}>
                   NVIDIA: {runtime?.nvidiaGpuFound ? "detected" : "not detected"}
@@ -1626,6 +1674,14 @@ function App() {
               >
                 <PackageOpen size={16} />
                 Outputs
+              </button>
+              <button
+                className="secondary runtime-button"
+                disabled={busy}
+                onClick={() => void unloadModels()}
+              >
+                <Power size={16} />
+                Unload
               </button>
               <button
                 className="secondary runtime-button"
@@ -1687,6 +1743,20 @@ function App() {
                   </select>
                 </label>
               </div>
+              {shouldRecommendCu128 && rtx50RecommendationGpu ? (
+                <div className="runtime-recommendation setup-recommendation">
+                  <span>
+                    {rtx50RecommendationGpu.name} detected. CUDA 12.8 is recommended for RTX 50 GPUs.
+                  </span>
+                  <button
+                    className="secondary mini-action"
+                    disabled={busy}
+                    onClick={() => setOptions((current) => ({ ...current, runtimeProfile: "cu128" }))}
+                  >
+                    Use CUDA 12.8
+                  </button>
+                </div>
+              ) : null}
               <div className="setup-checks">
                 <span className={runtime?.pythonFound ? "ok" : "warn"}>
                   Python: {runtime?.pythonFound ? "ready" : "needed"}

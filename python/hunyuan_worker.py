@@ -854,9 +854,107 @@ def patch_hunyuan_source(source_dir: Path) -> None:
         return
     content = texture_pipeline.read_text(encoding="utf-8")
     original = content
+    if "_ih3d_emit_texture_timing" not in content:
+        content = content.replace(
+            "import os\nimport torch",
+            "import os\nimport json\nimport time\nimport torch",
+            1,
+        )
+        content = content.replace(
+            "diffusers_logging.set_verbosity(50)\n",
+            "diffusers_logging.set_verbosity(50)\n"
+            "\n"
+            "\n"
+            "def _ih3d_format_elapsed(seconds):\n"
+            "    if seconds < 60:\n"
+            "        return f\"{seconds:.1f}s\"\n"
+            "    minutes, remaining = divmod(int(seconds), 60)\n"
+            "    hours, minutes = divmod(minutes, 60)\n"
+            "    if hours:\n"
+            "        return f\"{hours}h {minutes:02d}m {remaining:02d}s\"\n"
+            "    return f\"{minutes}m {remaining:02d}s\"\n"
+            "\n"
+            "\n"
+            "def _ih3d_emit_texture_timing(config, stage, started):\n"
+            "    try:\n"
+            "        elapsed = time.perf_counter() - started\n"
+            "        payload = {\n"
+            "            \"type\": \"stage_timing\",\n"
+            "            \"message\": f\"{stage} finished in {_ih3d_format_elapsed(elapsed)}\",\n"
+            "            \"stage\": stage,\n"
+            "            \"elapsedSeconds\": round(elapsed, 3),\n"
+            "        }\n"
+            "        event_path = getattr(config, \"ih3d_event_path\", None)\n"
+            "        if event_path:\n"
+            "            payload[\"path\"] = event_path\n"
+            "        print(json.dumps(payload, ensure_ascii=True), flush=True)\n"
+            "    except Exception:\n"
+            "        pass\n",
+            1,
+        )
     content = content.replace(
         "from DifferentiableRenderer.mesh_utils import convert_obj_to_glb",
         "from convert_utils import create_glb_with_pbr_materials",
+    )
+    content = content.replace(
+        "        # Process mesh\n"
+        "        path = os.path.dirname(mesh_path)\n"
+        "        if use_remesh:\n"
+        "            processed_mesh_path = os.path.join(path, \"white_mesh_remesh.obj\")\n"
+        "            remesh_mesh(mesh_path, processed_mesh_path)\n"
+        "        else:\n"
+        "            processed_mesh_path = mesh_path\n",
+        "        # Process mesh\n"
+        "        path = os.path.dirname(mesh_path)\n"
+        "        _ih3d_stage_started = time.perf_counter()\n"
+        "        if use_remesh:\n"
+        "            processed_mesh_path = os.path.join(path, \"white_mesh_remesh.obj\")\n"
+        "            remesh_mesh(mesh_path, processed_mesh_path)\n"
+        "        else:\n"
+        "            processed_mesh_path = mesh_path\n"
+        "        _ih3d_emit_texture_timing(self.config, \"Texture mesh prep\", _ih3d_stage_started)\n",
+    )
+    content = content.replace(
+        "        # Load mesh\n"
+        "        mesh = trimesh.load(processed_mesh_path)\n"
+        "        mesh = mesh_uv_wrap(mesh)\n"
+        "        self.render.load_mesh(mesh=mesh)\n",
+        "        # Load mesh\n"
+        "        _ih3d_stage_started = time.perf_counter()\n"
+        "        mesh = trimesh.load(processed_mesh_path)\n"
+        "        _ih3d_emit_texture_timing(self.config, \"Texture mesh load\", _ih3d_stage_started)\n"
+        "        _ih3d_stage_started = time.perf_counter()\n"
+        "        mesh = mesh_uv_wrap(mesh)\n"
+        "        self.render.load_mesh(mesh=mesh)\n"
+        "        _ih3d_emit_texture_timing(self.config, \"Texture UV unwrap\", _ih3d_stage_started)\n",
+    )
+    content = content.replace(
+        "        ########### View Selection #########\n"
+        "        selected_camera_elevs, selected_camera_azims, selected_view_weights = self.view_processor.bake_view_selection(\n"
+        "            self.config.candidate_camera_elevs,\n"
+        "            self.config.candidate_camera_azims,\n"
+        "            self.config.candidate_view_weights,\n"
+        "            self.config.max_selected_view_num,\n"
+        "        )\n"
+        "\n"
+        "        normal_maps = self.view_processor.render_normal_multiview(\n"
+        "            selected_camera_elevs, selected_camera_azims, use_abs_coor=True\n"
+        "        )\n"
+        "        position_maps = self.view_processor.render_position_multiview(selected_camera_elevs, selected_camera_azims)\n",
+        "        ########### View Selection #########\n"
+        "        _ih3d_stage_started = time.perf_counter()\n"
+        "        selected_camera_elevs, selected_camera_azims, selected_view_weights = self.view_processor.bake_view_selection(\n"
+        "            self.config.candidate_camera_elevs,\n"
+        "            self.config.candidate_camera_azims,\n"
+        "            self.config.candidate_view_weights,\n"
+        "            self.config.max_selected_view_num,\n"
+        "        )\n"
+        "\n"
+        "        normal_maps = self.view_processor.render_normal_multiview(\n"
+        "            selected_camera_elevs, selected_camera_azims, use_abs_coor=True\n"
+        "        )\n"
+        "        position_maps = self.view_processor.render_position_multiview(selected_camera_elevs, selected_camera_azims)\n"
+        "        _ih3d_emit_texture_timing(self.config, \"Texture view render\", _ih3d_stage_started)\n",
     )
     content = content.replace(
         "        multiviews_pbr = self.models[\"multiview_model\"](\n"
@@ -866,6 +964,7 @@ def patch_hunyuan_source(source_dir: Path) -> None:
         "            custom_view_size=self.config.resolution,\n"
         "            resize_input=True,\n"
         "        )",
+        "        _ih3d_stage_started = time.perf_counter()\n"
         "        multiviews_pbr = self.models[\"multiview_model\"](\n"
         "            image_style,\n"
         "            normal_maps + position_maps,\n"
@@ -875,12 +974,39 @@ def patch_hunyuan_source(source_dir: Path) -> None:
         "            num_inference_steps=getattr(self.config, \"texture_steps\", None),\n"
         "            guidance_scale=getattr(self.config, \"texture_guidance\", None),\n"
         "            seed=getattr(self.config, \"texture_seed\", 0),\n"
-        "        )",
+        "        )\n"
+        "        _ih3d_emit_texture_timing(self.config, \"Texture multiview diffusion\", _ih3d_stage_started)",
     )
+    if "Texture multiview diffusion" not in content:
+        content = content.replace(
+            "        multiviews_pbr = self.models[\"multiview_model\"](\n"
+            "            image_style,\n"
+            "            normal_maps + position_maps,\n"
+            "            prompt=image_caption,\n"
+            "            custom_view_size=self.config.resolution,\n"
+            "            resize_input=True,\n"
+            "            num_inference_steps=getattr(self.config, \"texture_steps\", None),\n"
+            "            guidance_scale=getattr(self.config, \"texture_guidance\", None),\n"
+            "            seed=getattr(self.config, \"texture_seed\", 0),\n"
+            "        )",
+            "        _ih3d_stage_started = time.perf_counter()\n"
+            "        multiviews_pbr = self.models[\"multiview_model\"](\n"
+            "            image_style,\n"
+            "            normal_maps + position_maps,\n"
+            "            prompt=image_caption,\n"
+            "            custom_view_size=self.config.resolution,\n"
+            "            resize_input=True,\n"
+            "            num_inference_steps=getattr(self.config, \"texture_steps\", None),\n"
+            "            guidance_scale=getattr(self.config, \"texture_guidance\", None),\n"
+            "            seed=getattr(self.config, \"texture_seed\", 0),\n"
+            "        )\n"
+            "        _ih3d_emit_texture_timing(self.config, \"Texture multiview diffusion\", _ih3d_stage_started)",
+        )
     content = content.replace(
         "        for i in range(len(enhance_images[\"albedo\"])):\n"
         "            enhance_images[\"albedo\"][i] = self.models[\"super_model\"](enhance_images[\"albedo\"][i])\n"
         "            enhance_images[\"mr\"][i] = self.models[\"super_model\"](enhance_images[\"mr\"][i])",
+        "        _ih3d_stage_started = time.perf_counter()\n"
         "        super_model = self.models[\"super_model\"]\n"
         "        if hasattr(super_model, \"enhance_batch\"):\n"
         "            enhance_images[\"albedo\"] = super_model.enhance_batch(enhance_images[\"albedo\"])\n"
@@ -888,7 +1014,87 @@ def patch_hunyuan_source(source_dir: Path) -> None:
         "        else:\n"
         "            for i in range(len(enhance_images[\"albedo\"])):\n"
         "                enhance_images[\"albedo\"][i] = super_model(enhance_images[\"albedo\"][i])\n"
-        "                enhance_images[\"mr\"][i] = super_model(enhance_images[\"mr\"][i])",
+        "                enhance_images[\"mr\"][i] = super_model(enhance_images[\"mr\"][i])\n"
+        "        _ih3d_emit_texture_timing(self.config, \"Texture RealESRGAN enhance\", _ih3d_stage_started)",
+    )
+    if "Texture RealESRGAN enhance" not in content:
+        content = content.replace(
+            "        super_model = self.models[\"super_model\"]\n"
+            "        if hasattr(super_model, \"enhance_batch\"):\n"
+            "            enhance_images[\"albedo\"] = super_model.enhance_batch(enhance_images[\"albedo\"])\n"
+            "            enhance_images[\"mr\"] = super_model.enhance_batch(enhance_images[\"mr\"])\n"
+            "        else:\n"
+            "            for i in range(len(enhance_images[\"albedo\"])):\n"
+            "                enhance_images[\"albedo\"][i] = super_model(enhance_images[\"albedo\"][i])\n"
+            "                enhance_images[\"mr\"][i] = super_model(enhance_images[\"mr\"][i])",
+            "        _ih3d_stage_started = time.perf_counter()\n"
+            "        super_model = self.models[\"super_model\"]\n"
+            "        if hasattr(super_model, \"enhance_batch\"):\n"
+            "            enhance_images[\"albedo\"] = super_model.enhance_batch(enhance_images[\"albedo\"])\n"
+            "            enhance_images[\"mr\"] = super_model.enhance_batch(enhance_images[\"mr\"])\n"
+            "        else:\n"
+            "            for i in range(len(enhance_images[\"albedo\"])):\n"
+            "                enhance_images[\"albedo\"][i] = super_model(enhance_images[\"albedo\"][i])\n"
+            "                enhance_images[\"mr\"][i] = super_model(enhance_images[\"mr\"][i])\n"
+            "        _ih3d_emit_texture_timing(self.config, \"Texture RealESRGAN enhance\", _ih3d_stage_started)",
+        )
+    content = content.replace(
+        "        ###########  Bake  ##########\n"
+        "        for i in range(len(enhance_images)):\n"
+        "            enhance_images[\"albedo\"][i] = enhance_images[\"albedo\"][i].resize(\n"
+        "                (self.config.render_size, self.config.render_size)\n"
+        "            )\n"
+        "            enhance_images[\"mr\"][i] = enhance_images[\"mr\"][i].resize((self.config.render_size, self.config.render_size))\n"
+        "        texture, mask = self.view_processor.bake_from_multiview(\n"
+        "            enhance_images[\"albedo\"], selected_camera_elevs, selected_camera_azims, selected_view_weights\n"
+        "        )\n"
+        "        mask_np = (mask.squeeze(-1).cpu().numpy() * 255).astype(np.uint8)\n"
+        "        texture_mr, mask_mr = self.view_processor.bake_from_multiview(\n"
+        "            enhance_images[\"mr\"], selected_camera_elevs, selected_camera_azims, selected_view_weights\n"
+        "        )\n"
+        "        mask_mr_np = (mask_mr.squeeze(-1).cpu().numpy() * 255).astype(np.uint8)\n",
+        "        ###########  Bake  ##########\n"
+        "        _ih3d_stage_started = time.perf_counter()\n"
+        "        for i in range(len(enhance_images)):\n"
+        "            enhance_images[\"albedo\"][i] = enhance_images[\"albedo\"][i].resize(\n"
+        "                (self.config.render_size, self.config.render_size)\n"
+        "            )\n"
+        "            enhance_images[\"mr\"][i] = enhance_images[\"mr\"][i].resize((self.config.render_size, self.config.render_size))\n"
+        "        texture, mask = self.view_processor.bake_from_multiview(\n"
+        "            enhance_images[\"albedo\"], selected_camera_elevs, selected_camera_azims, selected_view_weights\n"
+        "        )\n"
+        "        mask_np = (mask.squeeze(-1).cpu().numpy() * 255).astype(np.uint8)\n"
+        "        texture_mr, mask_mr = self.view_processor.bake_from_multiview(\n"
+        "            enhance_images[\"mr\"], selected_camera_elevs, selected_camera_azims, selected_view_weights\n"
+        "        )\n"
+        "        mask_mr_np = (mask_mr.squeeze(-1).cpu().numpy() * 255).astype(np.uint8)\n"
+        "        _ih3d_emit_texture_timing(self.config, \"Texture bake\", _ih3d_stage_started)\n",
+    )
+    content = content.replace(
+        "        ##########  inpaint  ###########\n"
+        "        texture = self.view_processor.texture_inpaint(texture, mask_np)\n"
+        "        self.render.set_texture(texture, force_set=True)\n"
+        "        if \"mr\" in enhance_images:\n"
+        "            texture_mr = self.view_processor.texture_inpaint(texture_mr, mask_mr_np)\n"
+        "            self.render.set_texture_mr(texture_mr)\n",
+        "        ##########  inpaint  ###########\n"
+        "        _ih3d_stage_started = time.perf_counter()\n"
+        "        texture = self.view_processor.texture_inpaint(texture, mask_np)\n"
+        "        self.render.set_texture(texture, force_set=True)\n"
+        "        if \"mr\" in enhance_images:\n"
+        "            texture_mr = self.view_processor.texture_inpaint(texture_mr, mask_mr_np)\n"
+        "            self.render.set_texture_mr(texture_mr)\n"
+        "        _ih3d_emit_texture_timing(self.config, \"Texture inpaint\", _ih3d_stage_started)\n",
+    )
+    content = content.replace(
+        "        self.render.save_mesh(output_mesh_path, downsample=True)\n"
+        "\n"
+        "        if save_glb:\n",
+        "        _ih3d_stage_started = time.perf_counter()\n"
+        "        self.render.save_mesh(output_mesh_path, downsample=True)\n"
+        "        _ih3d_emit_texture_timing(self.config, \"Texture OBJ export\", _ih3d_stage_started)\n"
+        "\n"
+        "        if save_glb:\n",
     )
     content = content.replace(
         '            convert_obj_to_glb(output_mesh_path, output_mesh_path.replace(".obj", ".glb"))\n'
@@ -898,9 +1104,30 @@ def patch_hunyuan_source(source_dir: Path) -> None:
         '                "metallic": output_mesh_path.replace(".obj", "_metallic.jpg"),\n'
         '                "roughness": output_mesh_path.replace(".obj", "_roughness.jpg"),\n'
         '            }\n'
+        '            _ih3d_stage_started = time.perf_counter()\n'
         '            create_glb_with_pbr_materials(output_mesh_path, textures, output_mesh_path.replace(".obj", ".glb"))\n'
+        '            _ih3d_emit_texture_timing(self.config, "Texture GLB export", _ih3d_stage_started)\n'
         '            output_glb_path = output_mesh_path.replace(".obj", ".glb")',
     )
+    if "Texture GLB export" not in content:
+        content = content.replace(
+            '            textures = {\n'
+            '                "albedo": output_mesh_path.replace(".obj", ".jpg"),\n'
+            '                "metallic": output_mesh_path.replace(".obj", "_metallic.jpg"),\n'
+            '                "roughness": output_mesh_path.replace(".obj", "_roughness.jpg"),\n'
+            '            }\n'
+            '            create_glb_with_pbr_materials(output_mesh_path, textures, output_mesh_path.replace(".obj", ".glb"))\n'
+            '            output_glb_path = output_mesh_path.replace(".obj", ".glb")',
+            '            textures = {\n'
+            '                "albedo": output_mesh_path.replace(".obj", ".jpg"),\n'
+            '                "metallic": output_mesh_path.replace(".obj", "_metallic.jpg"),\n'
+            '                "roughness": output_mesh_path.replace(".obj", "_roughness.jpg"),\n'
+            '            }\n'
+            '            _ih3d_stage_started = time.perf_counter()\n'
+            '            create_glb_with_pbr_materials(output_mesh_path, textures, output_mesh_path.replace(".obj", ".glb"))\n'
+            '            _ih3d_emit_texture_timing(self.config, "Texture GLB export", _ih3d_stage_started)\n'
+            '            output_glb_path = output_mesh_path.replace(".obj", ".glb")',
+        )
     if content != original:
         texture_pipeline.write_text(content, encoding="utf-8")
         emit("setup", "Patched Hunyuan texture export for standalone GLB output")
@@ -1476,6 +1703,7 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                     output_obj = final_mesh_path.with_suffix(".obj")
                     stage_started = time.perf_counter()
                     emit("stage_start", f"Generating PBR texture for {image_path.name}", path=str(image_path))
+                    paint_pipeline.config.ih3d_event_path = str(image_path)
                     result = paint_pipeline(
                         mesh_path=str(mesh_source),
                         image_path=str(image_path),

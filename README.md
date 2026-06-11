@@ -19,7 +19,7 @@ Use the app like a normal desktop tool.
    Or run the installer:
 
    ```text
-   release\installer\Image To Hunyuan 3D_26.6.20_x64-setup.exe
+   release\installer\Image To Hunyuan 3D_26.6.21_x64-setup.exe
    ```
 
 2. On first launch, the app checks what is already installed. If setup is
@@ -35,6 +35,8 @@ Use the app like a normal desktop tool.
      RTX 3090.
    - `CUDA 12.8 / RTX 50 Blackwell` is intended for RTX 50-series cards such as
      the RTX 5090.
+   - When an RTX 50-series card is detected, the app recommends CUDA 12.8 before
+     setup or generation.
    - `Auto choose compatible GPU` uses the best compatible card for the
      installed runtime.
 
@@ -52,6 +54,9 @@ Use the app like a normal desktop tool.
 
 7. Generated GLBs go into an `output` folder beside the running app by default.
    If you choose a different output folder, the app remembers it.
+
+The app keeps loaded models warm after generation for faster follow-up jobs. Use
+`Unload` in the Runtime panel when you want to release GPU memory.
 
 ComfyUI is not required. The app manages its own Python runtime, Hunyuan source,
 model cache, and texture tools in app data.
@@ -101,6 +106,10 @@ for that profile. Runtime profiles can live side by side, and `Reset Env`
 removes only the selected Python runtime environment; models and outputs stay
 untouched.
 
+Generation logs include per-item elapsed time, coarse mesh timing, and texture
+stage timings for mesh prep, UV unwrap, view render, multiview diffusion,
+RealESRGAN enhancement, bake, inpaint, OBJ export, and GLB export.
+
 ### Build And Release
 
 Prerequisites:
@@ -131,7 +140,7 @@ npm run release:build
 Release outputs:
 
 - `release\portable\image-to-hunyuan-3d.exe`
-- `release\installer\Image To Hunyuan 3D_26.6.20_x64-setup.exe`
+- `release\installer\Image To Hunyuan 3D_26.6.21_x64-setup.exe`
 
 ### Headless Runner
 
@@ -191,6 +200,7 @@ Endpoints:
 - `GET /vram`
 - `POST /prepare`
 - `POST /reset-runtime`
+- `POST /unload-models`
 - `POST /generate`
 - `POST /cancel`
 

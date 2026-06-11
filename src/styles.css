@@ -337,12 +337,44 @@ select:disabled {
 }
 
 .workspace-runtime .runtime-actions {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .workspace-runtime .runtime-button {
   min-width: 0;
   padding: 0 10px;
+}
+
+.runtime-recommendation {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin: 0 0 8px;
+  border: 1px solid rgba(43, 212, 191, 0.24);
+  border-radius: 7px;
+  color: #dffbf8;
+  background: rgba(43, 212, 191, 0.08);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.runtime-recommendation span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setup-recommendation {
+  margin: 12px 0 0;
+}
+
+.mini-action {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .topbar {

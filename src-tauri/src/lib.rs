@@ -1354,6 +1354,20 @@ fn reset_python_runtime(
     check_runtime(app, Some(requested_profile))
 }
 
+#[tauri::command]
+fn unload_models(
+    app: AppHandle,
+    active_jobs: State<'_, ActiveJobState>,
+    managed_workers: State<'_, ManagedWorkerState>,
+    runtime_profile: Option<String>,
+) -> Result<RuntimeStatus, String> {
+    if active_jobs.is_busy()? {
+        return Err("Wait for the current job to finish before unloading models.".to_string());
+    }
+    managed_workers.stop()?;
+    check_runtime(app, runtime_profile)
+}
+
 struct HttpRequest {
     method: String,
     path: String,
@@ -1504,6 +1518,7 @@ fn agent_openapi(port: u16) -> serde_json::Value {
             "/vram": { "get": { "summary": "Check NVIDIA VRAM" } },
             "/prepare": { "post": { "summary": "Prepare the standalone runtime" } },
             "/reset-runtime": { "post": { "summary": "Reset the managed Python runtime" } },
+            "/unload-models": { "post": { "summary": "Stop the warm worker and release loaded models" } },
             "/generate": { "post": { "summary": "Start a Hunyuan generation job" } },
             "/cancel": { "post": { "summary": "Cancel the active job" } }
         }
@@ -1629,6 +1644,15 @@ fn handle_agent_route(
                 fs::remove_dir_all(&env)
                     .map_err(|error| format!("Unable to reset Python runtime: {error}"))?;
             }
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        ("POST", "/unload-models") => {
+            if active_jobs.is_busy()? {
+                return Err(
+                    "Wait for the current job to finish before unloading models.".to_string(),
+                );
+            }
+            managed_workers.stop()?;
             Ok(serde_json::json!({ "ok": true }))
         }
         ("POST", "/cancel") => {
@@ -1834,7 +1858,8 @@ pub fn run() {
             reset_python_runtime,
             resolve_inputs,
             set_agent_server_enabled,
-            start_hunyuan_job
+            start_hunyuan_job,
+            unload_models
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
