@@ -527,10 +527,12 @@ function App() {
     if (!isTauriRuntime()) return;
     const status = await invoke<AgentServerStatus>("get_agent_server_status");
     setAgentStatus(status);
-    if (status.enabled || !window.localStorage.getItem(AGENT_PORT_STORAGE_KEY)) {
-      setAgentPort(String(status.port || DEFAULT_AGENT_API_PORT));
+    if (status.enabled || !agentControlEnabled) {
+      const nextPort = String(status.port || DEFAULT_AGENT_API_PORT);
+      setAgentPort(nextPort);
+      window.localStorage.setItem(AGENT_PORT_STORAGE_KEY, nextPort);
     }
-  }, []);
+  }, [agentControlEnabled]);
 
   const toggleAgentControl = useCallback(
     async (enabled: boolean) => {
