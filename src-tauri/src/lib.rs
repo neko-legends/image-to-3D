@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{
+    env,
     fs,
     io::{BufRead, BufReader, Cursor, Read, Write},
     net::{TcpListener, TcpStream},
@@ -11,7 +12,7 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
@@ -34,6 +35,10 @@ const MODEL_MARKER: &str = ".ih3d-models-v1-ready";
 const WHEEL_MARKER: &str = ".ih3d-texture-wheels-v1-ready";
 const DEFAULT_PYTORCH_PROFILE: &str = "cu124";
 const DEFAULT_AGENT_API_PORT: u16 = 17333;
+const AGENT_APP_ID: &str = "image-to-hunyuan-3d";
+const AGENT_APP_NAME: &str = "ImageToHunyuan3D";
+const AGENT_API_BIND_ADDRESS: &str = "127.0.0.1";
+const AGENT_API_REGISTRY_FILE: &str = "agent-api-registry.json";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,6 +152,30 @@ struct AgentServerStatus {
     busy: bool,
     active_job_id: Option<String>,
     message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AgentApiRegistryEntry {
+    app_id: String,
+    app_name: String,
+    default_port: u16,
+    bind_address: String,
+    port: u16,
+    enabled: bool,
+    url: String,
+    openapi_url: String,
+    busy: bool,
+    active_job_id: Option<String>,
+    last_seen: Option<String>,
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentApiRegistry {
+    updated_at: String,
+    apps: Vec<AgentApiRegistryEntry>,
 }
 
 #[derive(Clone, Default)]
@@ -328,7 +357,7 @@ struct AgentServerControl {
 impl AgentServerControl {
     fn port(&self) -> u16 {
         if self.port == 0 {
-            DEFAULT_AGENT_API_PORT
+            read_registered_agent_api_port().unwrap_or(DEFAULT_AGENT_API_PORT)
         } else {
             self.port
         }
@@ -1375,7 +1404,9 @@ struct HttpRequest {
 }
 
 fn validate_agent_api_port(port: Option<u16>) -> Result<u16, String> {
-    let port = port.unwrap_or(DEFAULT_AGENT_API_PORT);
+    let port = port
+        .or_else(read_registered_agent_api_port)
+        .unwrap_or(DEFAULT_AGENT_API_PORT);
     if port == 0 {
         return Err("Agent API port must be between 1 and 65535.".to_string());
     }
@@ -1383,7 +1414,99 @@ fn validate_agent_api_port(port: Option<u16>) -> Result<u16, String> {
 }
 
 fn agent_api_url(port: u16) -> String {
-    format!("http://127.0.0.1:{port}")
+    format!("http://{AGENT_API_BIND_ADDRESS}:{port}")
+}
+
+fn timestamp_string() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string())
+}
+
+fn shared_neko_legends_dir() -> Option<PathBuf> {
+    let base = if cfg!(target_os = "windows") {
+        env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+    } else if cfg!(target_os = "macos") {
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Library").join("Application Support"))
+    } else {
+        env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+    }?;
+    Some(base.join("NekoLegends"))
+}
+
+fn agent_api_registry_path() -> Option<PathBuf> {
+    Some(shared_neko_legends_dir()?.join(AGENT_API_REGISTRY_FILE))
+}
+
+fn read_agent_api_registry() -> AgentApiRegistry {
+    let updated_at = timestamp_string();
+    let Some(path) = agent_api_registry_path() else {
+        return AgentApiRegistry {
+            updated_at,
+            apps: Vec::new(),
+        };
+    };
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or(AgentApiRegistry {
+            updated_at,
+            apps: Vec::new(),
+        })
+}
+
+fn read_registered_agent_api_port() -> Option<u16> {
+    read_agent_api_registry()
+        .apps
+        .into_iter()
+        .find(|entry| entry.app_id == AGENT_APP_ID)
+        .map(|entry| entry.port)
+        .filter(|port| *port > 0)
+}
+
+fn publish_agent_api_status(status: &AgentServerStatus) {
+    let Some(path) = agent_api_registry_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut registry = read_agent_api_registry();
+    let updated_at = timestamp_string();
+    let entry = AgentApiRegistryEntry {
+        app_id: AGENT_APP_ID.to_string(),
+        app_name: AGENT_APP_NAME.to_string(),
+        default_port: DEFAULT_AGENT_API_PORT,
+        bind_address: AGENT_API_BIND_ADDRESS.to_string(),
+        port: status.port,
+        enabled: status.enabled,
+        url: status.url.clone(),
+        openapi_url: status.openapi_url.clone(),
+        busy: status.busy,
+        active_job_id: status.active_job_id.clone(),
+        last_seen: Some(updated_at.clone()),
+        note: Some("Local Agent API.".to_string()),
+    };
+    if let Some(existing) = registry
+        .apps
+        .iter_mut()
+        .find(|entry| entry.app_id == AGENT_APP_ID)
+    {
+        *existing = entry;
+    } else {
+        registry.apps.push(entry);
+    }
+    registry.updated_at = updated_at;
+    if let Ok(raw) = serde_json::to_string_pretty(&registry) {
+        let _ = fs::write(path, raw);
+    }
 }
 
 fn agent_status_from(
@@ -1398,7 +1521,7 @@ fn agent_status_from(
         (control.enabled, control.port())
     };
     let active_job_id = active_jobs.active_job_id()?;
-    Ok(AgentServerStatus {
+    let status = AgentServerStatus {
         enabled,
         port,
         url: agent_api_url(port),
@@ -1410,7 +1533,9 @@ fn agent_status_from(
         } else {
             "Agent API is off.".to_string()
         },
-    })
+    };
+    publish_agent_api_status(&status);
+    Ok(status)
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
