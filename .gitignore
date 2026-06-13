@@ -28,5 +28,6 @@ test-output
 *.ply
 *.fbx
 *.stl
+*.ih3dvox.json
 *.msi
 *-setup.exe

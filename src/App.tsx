@@ -19,12 +19,14 @@ import {
   RotateCcw,
   Settings2,
   Square,
+  Sun,
   Trash2,
   TriangleAlert,
   WandSparkles,
   XCircle
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { parseVoxelSidecar, VoxelDssViewer, type VoxelSidecar } from "./VoxelDssViewer";
 
 type PipelineMode = "meshTexture" | "meshOnly" | "textureOnly";
 type SeedMode = "fixed" | "randomize";
@@ -105,6 +107,8 @@ type HunyuanOptions = {
   reduceFaces: boolean;
   maxFaces: number;
   smoothNormals: boolean;
+  voxelize: boolean;
+  voxelResolution: number;
   textureViewSize: number;
   textureSteps: number;
   textureGuidance: number;
@@ -214,6 +218,8 @@ const defaultOptions: HunyuanOptions = {
   reduceFaces: true,
   maxFaces: 15000,
   smoothNormals: true,
+  voxelize: false,
+  voxelResolution: 64,
   textureViewSize: 512,
   textureSteps: 15,
   textureGuidance: 3,
@@ -323,6 +329,8 @@ function loadSavedOptions(): HunyuanOptions {
       reduceFaces: coerceBoolean(parsed.reduceFaces, defaultOptions.reduceFaces),
       maxFaces: coerceNumber(parsed.maxFaces, defaultOptions.maxFaces, 1000, 200000),
       smoothNormals: coerceBoolean(parsed.smoothNormals, defaultOptions.smoothNormals),
+      voxelize: coerceBoolean(parsed.voxelize, defaultOptions.voxelize),
+      voxelResolution: coerceNumber(parsed.voxelResolution, defaultOptions.voxelResolution, 8, 512),
       textureViewSize: coerceNumber(parsed.textureViewSize, defaultOptions.textureViewSize, 256, 2048),
       textureSteps: savedFromLegacyKey && parsed.textureSteps === 10
         ? defaultOptions.textureSteps
@@ -474,6 +482,9 @@ function App() {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [previewModelPath, setPreviewModelPath] = useState<string | null>(null);
   const [previewImages, setPreviewImages] = useState<PreviewImages>({});
+  const [voxelSidecar, setVoxelSidecar] = useState<VoxelSidecar | null>(null);
+  const [voxelPreviewError, setVoxelPreviewError] = useState<string | null>(null);
+  const [dssPreviewEnabled, setDssPreviewEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -501,6 +512,8 @@ function App() {
     () => (selectedModel && isTauriRuntime() ? convertFileSrc(selectedModel) : ""),
     [selectedModel]
   );
+  const canUseDssPreview = Boolean(voxelSidecar);
+  const showDssPreview = Boolean(modelUrl && dssPreviewEnabled && voxelSidecar);
   const canStart = useMemo(() => {
     if (busy || queue.length === 0) return false;
     if (options.mode === "textureOnly" && !options.meshInputPath) return false;
@@ -813,6 +826,42 @@ function App() {
       canceled = true;
     };
   }, [selectedItem]);
+
+  useEffect(() => {
+    setVoxelSidecar(null);
+    setVoxelPreviewError(null);
+    if (!selectedModel || !isTauriRuntime()) {
+      setDssPreviewEnabled(false);
+      return;
+    }
+    let canceled = false;
+    const loadSidecar = async () => {
+      try {
+        const raw = await invoke<string | null>("read_voxel_sidecar", { modelPath: selectedModel });
+        if (canceled) return;
+        if (!raw) {
+          setDssPreviewEnabled(false);
+          return;
+        }
+        const parsed = parseVoxelSidecar(raw);
+        if (!parsed) {
+          setVoxelPreviewError("Voxel preview data could not be read.");
+          setDssPreviewEnabled(false);
+          return;
+        }
+        setVoxelSidecar(parsed);
+      } catch (error) {
+        if (!canceled) {
+          setVoxelPreviewError(String(error));
+          setDssPreviewEnabled(false);
+        }
+      }
+    };
+    void loadSidecar();
+    return () => {
+      canceled = true;
+    };
+  }, [selectedModel]);
 
   const chooseInputs = useCallback(async () => {
     const selected = await openDialog({
@@ -1255,6 +1304,33 @@ function App() {
               />
               <span>Compile shape model</span>
             </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={options.voxelize}
+                disabled={options.mode === "textureOnly"}
+                onChange={(event) => setOptions((current) => ({ ...current, voxelize: event.target.checked }))}
+              />
+              <span>Voxel style mesh</span>
+            </label>
+            {options.voxelize ? (
+              <label className="field">
+                <span>Voxel resolution</span>
+                <input
+                  type="number"
+                  min="8"
+                  max="512"
+                  value={options.voxelResolution}
+                  disabled={options.mode === "textureOnly"}
+                  onChange={(event) =>
+                    setOptions((current) => ({
+                      ...current,
+                      voxelResolution: Number(event.target.value) || current.voxelResolution
+                    }))
+                  }
+                />
+              </label>
+            ) : null}
           </section>
 
           <section className="panel">
@@ -1474,11 +1550,26 @@ function App() {
 
             <section className="preview-panel">
               <div className="preview-head">
-                <strong>3D Preview</strong>
-                <small>{selectedModel ? fileName(selectedModel) : "Drop a GLB to preview"}</small>
+                <div className="preview-title">
+                  <strong>3D Preview</strong>
+                  <small>{selectedModel ? fileName(selectedModel) : "Drop a GLB to preview"}</small>
+                </div>
+                {selectedModel ? (
+                  <button
+                    className={`secondary preview-toggle ${showDssPreview ? "active" : ""}`}
+                    disabled={!canUseDssPreview}
+                    onClick={() => setDssPreviewEnabled((enabled) => !enabled)}
+                    title={canUseDssPreview ? "Toggle DSS lighting" : "DSS lighting is available for voxel-style outputs"}
+                  >
+                    <Sun size={15} />
+                    DSS
+                  </button>
+                ) : null}
               </div>
               <div className="model-frame">
-                {modelUrl ? (
+                {showDssPreview && voxelSidecar ? (
+                  <VoxelDssViewer sidecar={voxelSidecar} autoRotate={!busy} />
+                ) : modelUrl ? (
                   <model-viewer
                     key={modelUrl}
                     src={modelUrl}
@@ -1495,7 +1586,9 @@ function App() {
                   </div>
                 )}
               </div>
-              {previewImages.error ? <small className="preview-error">{previewImages.error}</small> : null}
+              {previewImages.error || voxelPreviewError ? (
+                <small className="preview-error">{previewImages.error ?? voxelPreviewError}</small>
+              ) : null}
             </section>
           </div>
 

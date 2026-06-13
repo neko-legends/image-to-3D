@@ -75,6 +75,8 @@ def default_options(root: Path) -> dict[str, object]:
         "reduceFaces": True,
         "maxFaces": 15000,
         "smoothNormals": True,
+        "voxelize": False,
+        "voxelResolution": 64,
         "textureViewSize": 512,
         "textureSteps": 15,
         "textureGuidance": 3.0,
@@ -114,6 +116,8 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-chunks", type=int, default=None)
     parser.add_argument("--texture-view-size", type=int, default=None)
     parser.add_argument("--texture-size", type=int, default=None)
+    parser.add_argument("--voxelize", action="store_true", help="Export a blocky voxel-style mesh instead of a smooth mesh.")
+    parser.add_argument("--voxel-resolution", type=int, default=None, help="Voxel grid resolution along the longest axis (8-512).")
     parser.add_argument("--fast-preview", action="store_true", help="Use faster mesh-only preview settings.")
     parser.add_argument("--app-data-dir", type=Path, default=None)
     return parser
@@ -144,6 +148,8 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
         "outputName": args.output_name,
         "meshInputPath": str(Path(args.mesh_input_path).resolve()) if args.mesh_input_path else None,
         "overwrite": args.overwrite if args.overwrite else None,
+        "voxelize": args.voxelize if args.voxelize else None,
+        "voxelResolution": args.voxel_resolution,
         "meshGuidance": args.mesh_guidance,
         "meshSeed": args.mesh_seed,
         "meshSeedMode": args.mesh_seed_mode,

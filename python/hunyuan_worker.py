@@ -46,6 +46,7 @@ ENV_MARKER = ".ih3d-env-v4-ready"
 SOURCE_MARKER = ".ih3d-source-v1-ready"
 MODEL_MARKER = ".ih3d-models-v1-ready"
 WHEEL_MARKER = ".ih3d-texture-wheels-v1-ready"
+VOXEL_DSS_SIDECAR_MAX_CELLS = 300_000
 BOOTSTRAP_PACKAGES = ["pip>=24.3", "setuptools<81", "wheel>=0.43"]
 DEFAULT_PYTORCH_PROFILE = "cu124"
 PYTORCH_RUNTIME_PROFILES = {
@@ -1546,6 +1547,55 @@ PIPELINE_CACHE: dict[str, Any] = {
 }
 
 
+def voxel_sidecar_path(mesh_path: Path) -> Path:
+    return mesh_path.with_suffix(".ih3dvox.json")
+
+
+def write_voxel_sidecar(sidecar: dict[str, Any], mesh_path: Path) -> Path:
+    sidecar_path = voxel_sidecar_path(mesh_path)
+    payload = {
+        **sidecar,
+        "modelFile": mesh_path.name,
+    }
+    with sidecar_path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, separators=(",", ":"))
+    return sidecar_path
+
+
+def voxelize_mesh(mesh: Any, resolution: int) -> tuple[Any, dict[str, Any] | None, int]:
+    """Convert a smooth mesh into a blocky voxel-style mesh.
+
+    The mesh is sampled into a voxel grid whose longest side is `resolution`
+    voxels, then rebuilt as axis-aligned cubes (Minecraft-style)."""
+    extents = getattr(mesh, "extents", None)
+    if extents is None or max(extents) <= 0:
+        raise RuntimeError("Mesh has no volume to voxelize.")
+    pitch = float(max(extents)) / float(max(8, resolution))
+    voxel_grid = mesh.voxelized(pitch)
+    try:
+        voxel_grid = voxel_grid.fill()
+    except Exception:
+        # Filling the interior is optional; a hollow shell still looks correct.
+        pass
+    sparse_indices = voxel_grid.sparse_indices
+    voxel_count = int(len(sparse_indices))
+    sidecar = None
+    if voxel_count <= VOXEL_DSS_SIDECAR_MAX_CELLS:
+        dims = [int(value) for value in voxel_grid.shape]
+        sidecar = {
+            "format": "ih3d.voxel-dss.v1",
+            "dims": dims,
+            "cells": [int(value) for row in sparse_indices for value in row],
+            "voxelCount": voxel_count,
+            "resolution": int(resolution),
+            "pitch": float(pitch),
+        }
+    voxel_mesh = voxel_grid.as_boxes()
+    # Preserve the original placement so downstream texturing lines up.
+    voxel_mesh.apply_translation(mesh.bounds.mean(axis=0) - voxel_mesh.bounds.mean(axis=0))
+    return voxel_mesh, sidecar, voxel_count
+
+
 def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     source_dir = paths["source_dir"]
     launch_cwd = Path.cwd()
@@ -1660,6 +1710,7 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                 final_mesh_path = unique_target(requested_output / f"{base}.glb", overwrite)
                 intermediate_mesh = run_dir / f"{base}_mesh.glb"
                 outputs: list[str] = []
+                voxel_sidecar: dict[str, Any] | None = None
 
                 if mode != "textureOnly":
                     assert shape_pipeline is not None
@@ -1683,6 +1734,20 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                     )
                     emit_timing("Mesh generation", stage_started, path=str(image_path))
                     mesh = meshes[0]
+                    if as_bool(options.get("voxelize"), False):
+                        voxel_started = time.perf_counter()
+                        emit("stage_start", f"Voxelizing mesh for {image_path.name}", path=str(image_path))
+                        mesh, voxel_sidecar, voxel_count = voxelize_mesh(
+                            mesh,
+                            as_int(options.get("voxelResolution"), 64, 8, 512),
+                        )
+                        if voxel_sidecar is None:
+                            emit(
+                                "setup",
+                                f"DSS preview skipped for {image_path.name}: {voxel_count:,} voxels is too large.",
+                                path=str(image_path),
+                            )
+                        emit_timing("Mesh voxelize", voxel_started, path=str(image_path))
                     export_started = time.perf_counter()
                     mesh.export(intermediate_mesh)
                     emit_timing("Mesh export", export_started, path=str(image_path))
@@ -1723,6 +1788,9 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                             final_mesh_path.unlink()
                         shutil.move(str(result_path), str(final_mesh_path))
                     outputs.extend(find_existing_output(final_mesh_path, output_obj, output_obj.with_suffix(".jpg")))
+
+                if voxel_sidecar and final_mesh_path.exists():
+                    write_voxel_sidecar(voxel_sidecar, final_mesh_path)
 
                 elapsed_seconds = time.perf_counter() - image_started
                 emit(

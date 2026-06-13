@@ -564,6 +564,12 @@ button:disabled {
   margin-bottom: 10px;
 }
 
+.preview-title {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
 .preview-head strong,
 .model-frame span {
   color: #ffd2a1;
@@ -574,6 +580,19 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.preview-toggle {
+  min-width: 78px;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.preview-toggle.active {
+  color: #10110e;
+  border-color: transparent;
+  background: linear-gradient(180deg, #84ede2, #ffad45);
 }
 
 .model-frame,
@@ -596,6 +615,20 @@ button:disabled {
   width: 100%;
   height: 314px;
   background: radial-gradient(circle at 50% 35%, rgba(43, 212, 191, 0.1), transparent 48%), #070807;
+}
+
+.dss-viewer,
+.dss-canvas {
+  width: 100%;
+  height: 314px;
+}
+
+.dss-viewer {
+  background: radial-gradient(circle at 50% 35%, rgba(43, 212, 191, 0.1), transparent 48%), #070807;
+}
+
+.dss-canvas {
+  display: block;
 }
 
 .preview-empty {

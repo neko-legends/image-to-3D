@@ -111,6 +111,10 @@ struct HunyuanOptions {
     reduce_faces: bool,
     max_faces: u32,
     smooth_normals: bool,
+    #[serde(default)]
+    voxelize: bool,
+    #[serde(default = "default_voxel_resolution")]
+    voxel_resolution: u32,
     texture_view_size: u32,
     texture_steps: u32,
     texture_guidance: f32,
@@ -454,6 +458,10 @@ fn env_runtime_profile(env: &Path) -> String {
     "unknown".to_string()
 }
 
+fn default_voxel_resolution() -> u32 {
+    64
+}
+
 fn default_hunyuan_options() -> HunyuanOptions {
     HunyuanOptions {
         mode: "meshTexture".to_string(),
@@ -482,6 +490,8 @@ fn default_hunyuan_options() -> HunyuanOptions {
         reduce_faces: true,
         max_faces: 15000,
         smooth_normals: true,
+        voxelize: false,
+        voxel_resolution: 64,
         texture_view_size: 512,
         texture_steps: 15,
         texture_guidance: 3.0,
@@ -985,6 +995,30 @@ fn preview_thumbnail_data_url(image_path: &Path) -> Result<String, String> {
         "data:image/jpeg;base64,{}",
         general_purpose::STANDARD.encode(encoded.into_inner())
     ))
+}
+
+fn voxel_sidecar_path(model_path: &Path) -> PathBuf {
+    model_path.with_extension("ih3dvox.json")
+}
+
+#[tauri::command]
+fn read_voxel_sidecar(model_path: String) -> Result<Option<String>, String> {
+    let model_path = PathBuf::from(model_path);
+    if !model_path.is_file() {
+        return Ok(None);
+    }
+    let sidecar_path = voxel_sidecar_path(&model_path);
+    if !sidecar_path.is_file() {
+        return Ok(None);
+    }
+    let metadata = fs::metadata(&sidecar_path)
+        .map_err(|error| format!("Unable to read voxel preview metadata: {error}"))?;
+    if metadata.len() > 64 * 1024 * 1024 {
+        return Err("Voxel preview data is too large to load.".to_string());
+    }
+    fs::read_to_string(&sidecar_path)
+        .map(Some)
+        .map_err(|error| format!("Unable to read voxel preview data: {error}"))
 }
 
 #[tauri::command]
@@ -1980,6 +2014,7 @@ pub fn run() {
             open_runtime_folder,
             prepare_runtime,
             preview_image_data_url,
+            read_voxel_sidecar,
             reset_python_runtime,
             resolve_inputs,
             set_agent_server_enabled,
