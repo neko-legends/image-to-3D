@@ -1,3 +1,10 @@
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  VENDORED FILE — DO NOT EDIT HERE.                                         ║
+// ║  Canonical source: github.com/neko-legends/NekoLegendsAI-Shared           ║
+// ║                    rust/neko_store.rs                                      ║
+// ║  Edits here will be OVERWRITTEN. Fix the canonical copy, then re-vendor:   ║
+// ║    python NekoLegendsAI-Shared/scripts/neko_suite_doctor.py --fix          ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
 //! neko_store — shared local AI store resolver for Neko Legends / ForPublic apps.
 //!
 //! Vendored module: not every app uses every public method, so allow dead_code.
