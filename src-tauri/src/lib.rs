@@ -23,6 +23,9 @@ use std::os::unix::process::CommandExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+mod neko_store;
+use neko_store::NekoStore;
+
 const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "jpe", "jfif", "jpf", "jp2", "j2k", "webp", "bmp", "tif", "tiff",
 ];
@@ -378,6 +381,25 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// App identifier used for the shared NekoLegendsAI store.
+const NEKO_APP_SLUG: &str = "hunyuan3d";
+
+/// Resolve the shared NekoLegendsAI store, hinting the default location to the
+/// executable's drive so a portable install on `D:` lands the store at
+/// `D:\NekoLegendsAI` (next to the app, on the roomy data drive).
+fn neko_store(app: &AppHandle) -> Result<NekoStore, String> {
+    let app_data = app_data_dir(app)?;
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf));
+    Ok(NekoStore::resolve_with_volume_hint(
+        NEKO_APP_SLUG,
+        &app_data,
+        exe_dir.as_deref(),
+    ))
+}
+
+
 fn env_python_path(env_dir: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
         env_dir.join("Scripts").join("python.exe")
@@ -419,7 +441,15 @@ fn source_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn model_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_data_dir(app)?.join("models"))
+    // Preserve any pre-existing app-local models folder so upgrades never orphan
+    // already-downloaded models. New installs use the shared NekoLegendsAI store,
+    // which co-locates with the same HF_HOME the worker env already expects.
+    let app_data = app_data_dir(app)?;
+    let legacy = app_data.join("models");
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    Ok(neko_store(app)?.models_dir)
 }
 
 fn default_output_dir() -> Result<PathBuf, String> {
@@ -705,6 +735,19 @@ fn configure_managed_worker_env(
             models.join("huggingface").join("transformers"),
         )
         .env("XFORMERS_FORCE_DISABLE_TRITON", "1");
+
+    // Route pip/uv/torch caches to the shared NekoLegendsAI store so PyTorch and
+    // wheel downloads are reused across every app in the suite. `models` already
+    // points at the store's models dir, so its parent is the store root. When the
+    // legacy app-local models path is in use, caches simply live beside it — still
+    // correct, just app-local.
+    if let Some(store_root) = models.parent() {
+        let cache = store_root.join("cache");
+        command
+            .env("PIP_CACHE_DIR", cache.join("pip"))
+            .env("UV_CACHE_DIR", cache.join("uv"))
+            .env("TORCH_HOME", cache.join("torch"));
+    }
 }
 
 fn kill_process_tree(pid: u32) -> Result<(), String> {
