@@ -29,5 +29,9 @@ test-output
 *.fbx
 *.stl
 *.ih3dvox.json
+*.exe
 *.msi
+*.dmg
+*.7z
+*.tar.gz
 *-setup.exe
