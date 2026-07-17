@@ -1741,8 +1741,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "image-to-hunyuan-3d"
-version = "26.6.21"
+name = "image-to-3d"
+version = "26.7.16"
 dependencies = [
  "base64 0.22.1",
  "image",

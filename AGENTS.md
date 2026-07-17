@@ -1,4 +1,4 @@
-# AGENTS.md — ImageToHunyuan3D
+# AGENTS.md — ImageTo3D
 
 Guidance for AI coding agents (and humans) working in this repo.
 
@@ -24,9 +24,10 @@ If you need to change one of these:
 
 ## This app
 
-ImageToHunyuan3D is a Tauri 2 + React/TS desktop app with a Python worker. It runs
-a local image-to-3D workflow (Hunyuan mesh + texture generation) on the user's
-own GPU, with profiled CUDA environments (cu124 / cu128).
+ImageTo3D is a Tauri 2 + React/TS desktop app with a Python worker. It runs
+local image-to-3D workflows on the user's own GPU, with profiled CUDA
+environments (cu124 / cu128) and backend-specific setup for Hunyuan3D and
+TRELLIS.2.
 
 - Frontend: `src/` (React 18, TypeScript strict).
 - Backend: `src-tauri/src/lib.rs` (Tauri commands + local Agent API on port 17333).

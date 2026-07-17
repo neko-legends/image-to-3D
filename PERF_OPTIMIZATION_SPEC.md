@@ -1,4 +1,4 @@
-# Performance Optimization Spec — ImageToHunyuan3D
+# Performance Optimization Spec — ImageTo3D
 
 **Target environment:** Windows 11, NVIDIA RTX 5090 (Blackwell, sm_120, 32 GB GDDR7), cu128 runtime profile (torch 2.7.1+cu128).
 

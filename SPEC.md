@@ -1,15 +1,15 @@
-# Image To Hunyuan 3D Spec
+# Image To 3D Spec
 
 ## Goal
 
-Create a dedicated local desktop app for Image to Hunyuan3D generation that
+Create a dedicated local desktop app for Image to 3D generation that
 feels like the other `D:\forPublic` AI tools while running as a standalone
 app-managed runtime instead of a ComfyUI controller.
 
 ## Product Shape
 
-- Name: Image To Hunyuan 3D
-- Icon mark: `IH`
+- Name: Image To 3D
+- Icon mark: `I3D`
 - Theme: dark local-workstation UI, orange DepthMap lineage, teal 3D accent
 - Primary user: local NVIDIA GPU user
 - Primary output: textured GLB
@@ -21,11 +21,12 @@ Use the DepthMapAIGenerator pattern:
 - No repository `.venv`.
 - Tauri launches a lightweight bootstrap Python worker.
 - The worker creates an app-managed virtual environment under app data.
-- The worker downloads Hunyuan source, native texture wheels, and model weights
-  into app data only after the user confirms setup.
+- The worker downloads selected backend source and model weights into app data
+  only after the user confirms setup.
 - The worker installs a curated inference dependency set, not upstream demo/API
   packages such as Gradio, FastAPI, Blender Python, Cupy, or Deepspeed.
-- Generation runs through Tencent's direct Hunyuan3D 2.1 Python APIs.
+- Generation runs through backend-specific direct Python APIs, starting with
+  Tencent's Hunyuan3D 2.1 API and Microsoft's TRELLIS.2 pipeline.
 - ComfyUI is not required.
 
 ## Workflow Strategy

@@ -1,7 +1,7 @@
 {
-  "name": "image-to-hunyuan-3d",
+  "name": "image-to-3d",
   "private": true,
-  "version": "26.6.21",
+  "version": "26.7.16",
   "license": "MIT",
   "type": "module",
   "scripts": {

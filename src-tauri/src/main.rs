@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    image_to_hunyuan_3d_lib::run()
+    image_to_3d_lib::run()
 }

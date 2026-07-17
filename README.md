@@ -1,10 +1,18 @@
-# Image To Hunyuan 3D
+# Image To 3D
 
-Image To Hunyuan 3D turns images into Hunyuan3D 2.1 meshes and textured GLBs
-without opening ComfyUI.
+Image To 3D turns images into local 3D assets without opening ComfyUI. The
+project is now organized around three supported 3D model families: Hunyuan3D,
+TripoSplat, and TRELLIS.2.
 
-The app is designed for NVIDIA GPUs. Hunyuan3D 2.1 is a large CUDA workload;
-CPU generation is not a supported target.
+| Backend | Output type | Status |
+| --- | --- | --- |
+| Hunyuan3D 2.1 | Mesh/PBR GLB, mesh-only GLB, texture-only GLB | Integrated |
+| TripoSplat | Gaussian splats and point-cloud-style exports | Supported model family; Tauri backend integration next |
+| TRELLIS.2 4B | O-Voxel/PBR GLB | Experimental integration |
+
+The app is designed for NVIDIA GPUs. Hunyuan3D and TRELLIS.2 are large CUDA
+workloads, and TripoSplat is also GPU-oriented; CPU generation is not a
+supported target.
 
 ## For Humans
 
@@ -13,13 +21,13 @@ Use the app like a normal desktop tool.
 1. Run the portable app:
 
    ```text
-   release\portable\image-to-hunyuan-3d.exe
+   release\portable\image-to-3d.exe
    ```
 
    Or run the installer:
 
    ```text
-   release\installer\Image To Hunyuan 3D_26.6.21_x64-setup.exe
+   release\installer\Image To 3D_26.7.16_x64-setup.exe
    ```
 
 2. On first launch, the app checks what is already installed. If setup is
@@ -40,26 +48,61 @@ Use the app like a normal desktop tool.
    - `Auto choose compatible GPU` uses the best compatible card for the
      installed runtime.
 
-5. Choose a mode:
+5. Choose a model backend:
+
+   - `Hunyuan3D 2.1` supports mesh, mesh + texture, and texture-only workflows.
+   - `TripoSplat` creates Gaussian splat outputs rather than polygon meshes.
+     It is the splat-focused path for viewers and tools that understand native
+     splat formats.
+   - `TRELLIS.2 4B` generates a textured GLB through Microsoft's official
+     TRELLIS.2 pipeline and currently follows its Linux/CUDA/native-extension
+     requirements.
+
+   TRELLIS.2 also depends on gated Hugging Face models. Before choosing
+   `Prepare` for TRELLIS.2, sign in to Hugging Face with the account you use for
+   the app and accept/request access for every required repo:
+
+   - `microsoft/TRELLIS.2-4B`:
+     https://huggingface.co/microsoft/TRELLIS.2-4B
+   - `facebook/dinov3-vitl16-pretrain-lvd1689m`:
+     https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m
+   - `briaai/RMBG-2.0`:
+     https://huggingface.co/briaai/RMBG-2.0
+
+   `RMBG-2.0` is required too; TRELLIS.2 uses it for background removal before
+   reconstruction, so Prepare can still be blocked even after TRELLIS.2 and
+   DINOv3 are accepted.
+
+   If the app cannot access one of these gated repos, Prepare will stop with the
+   exact link to accept. Use your own authorized Hugging Face token, for example
+   through `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN`, when running the app or the
+   headless runner.
+
+6. For Hunyuan, choose a mode:
 
    - `Mesh + Texture` creates a textured GLB.
    - `Mesh only` creates a faster mesh preview GLB.
    - `Texture only` textures an existing `.glb`, `.gltf`, `.obj`, or `.ply`.
 
-6. Pick mesh detail:
+7. Pick geometry detail or TRELLIS resolution:
 
-   - `Low` is faster for previews.
-   - `Medium` is the default balance.
-   - `High` spends more time on a denser mesh.
+   - `Low poly` is the default and targets about 5k faces.
+   - `Medium` targets about 20k faces.
+   - `High` targets about 50k faces.
 
-7. Generated GLBs go into an `output` folder beside the running app by default.
+8. Generated GLBs go into an `output` folder beside the running app by default.
    If you choose a different output folder, the app remembers it.
 
 The app keeps loaded models warm after generation for faster follow-up jobs. Use
 `Unload` in the Runtime panel when you want to release GPU memory.
 
-ComfyUI is not required. The app manages its own Python runtime, Hunyuan source,
-model cache, and texture tools in app data.
+ComfyUI is not required. The app manages its own Python runtime, backend source
+folders, model cache, and texture tools in app data.
+
+After the rename to Image To 3D, an existing install may still use the legacy
+`%APPDATA%\public.image.to.hunyuan3d` data folder. That is intentional: the app
+reuses the old folder when it is already present so large model downloads do not
+have to be repeated.
 
 If you want an AI agent to control the app while the GUI is open, enable the
 `Agent API` checkbox in the Pipeline panel. Most people can leave it off.
@@ -74,11 +117,12 @@ Managed app data contains:
 - `python-env*` - app-owned Python environments for selected PyTorch runtime
   profiles.
 - `runtime\Hunyuan3D-2.1` - downloaded Hunyuan source.
+- `runtime\TRELLIS.2` - downloaded TRELLIS.2 source.
 - `runtime\ComfyUI-Hunyuan3d-2-1-wheels` - Windows texture wheel source.
 - `models` - Hugging Face model cache.
 - `jobs` - per-run job files and temporary meshes.
 
-First-run preparation downloads/installs:
+Hunyuan preparation downloads/installs:
 
 - Hunyuan source from `Tencent-Hunyuan/Hunyuan3D-2.1`.
 - PyTorch CUDA wheels for Python 3.10-3.12.
@@ -87,6 +131,32 @@ First-run preparation downloads/installs:
 - Model weights from `tencent/Hunyuan3D-2.1`.
 - Texture conditioning from `facebook/dinov2-giant`.
 - `RealESRGAN_x4plus.pth` for texture enhancement.
+
+TRELLIS.2 preparation downloads/installs:
+
+- TRELLIS.2 source from `microsoft/TRELLIS.2`.
+- Model weights from `microsoft/TRELLIS.2-4B`.
+- Image conditioning weights from gated `facebook/dinov3-vitl16-pretrain-lvd1689m`.
+- Background removal weights from gated `briaai/RMBG-2.0`.
+- Basic TRELLIS.2 Python dependencies plus native extensions used by the
+  official pipeline, including O-Voxel.
+
+If an existing install was prepared before the shared Hunyuan/TRELLIS dependency
+repair, run Prepare again for the selected backend. The app intentionally uses a
+new runtime marker so the managed Python env can be repaired instead of reusing a
+broken `transformers`/`diffusers` mix.
+
+The gated Hugging Face dependencies are downloaded only after the user has
+accepted their upstream access terms with their own Hugging Face account/token.
+Do not bundle or redistribute gated model weights in app releases unless you
+have explicit permission and the license/access terms allow it.
+
+TripoSplat preparation downloads/installs:
+
+- Model weights from `VAST-AI/TripoSplat`.
+- TripoSplat pipeline code and dependencies for Gaussian splat generation.
+- Native `.splat` / `.ply` style outputs, with point-cloud conversions where
+  broader 3D-tool compatibility is needed.
 
 The app intentionally skips full upstream demo/API/training dependencies such as
 Gradio, FastAPI, Blender Python, Cupy, and Deepspeed.
@@ -139,8 +209,8 @@ npm run release:build
 
 Release outputs:
 
-- `release\portable\image-to-hunyuan-3d.exe`
-- `release\installer\Image To Hunyuan 3D_26.6.21_x64-setup.exe`
+- `release\portable\image-to-3d.exe`
+- `release\installer\Image To 3D_26.7.16_x64-setup.exe`
 
 ### Headless Runner
 
@@ -161,6 +231,7 @@ JSON worker events to stdout.
 
 Useful flags:
 
+- `--model-backend hunyuan` or `--model-backend trellis2` selects the backend.
 - `--fast-preview` uses faster mesh-only settings.
 - `--cuda-device 1` selects a specific NVIDIA GPU index.
 - `--runtime-profile cu128` installs/uses the CUDA 12.8 RTX 50-series profile.
@@ -178,12 +249,24 @@ The GUI exposes a local-only Agent API when the user enables `Agent API` in the
 Pipeline panel. The same API can be started on app launch by setting:
 
 ```powershell
-$env:IH3D_AGENT_API = '1'
-.\release\portable\image-to-hunyuan-3d.exe
+$env:I3D_AGENT_API = '1'
+.\release\portable\image-to-3d.exe
+```
+
+Automation can also start it explicitly by writing
+`release\portable\output\agent-api-autostart.json` before launching the app:
+
+```json
+{
+  "enabled": true,
+  "port": 17333
+}
 ```
 
 The default port is `17333`. Change it in the Pipeline panel, or set
-`IH3D_AGENT_API_PORT` when using environment auto-start.
+`I3D_AGENT_API_PORT` when using environment auto-start. The legacy
+`IH3D_AGENT_API` and `IH3D_AGENT_API_PORT` names are still accepted for old
+automation.
 
 Default base URL:
 
@@ -201,8 +284,17 @@ Endpoints:
 - `POST /prepare`
 - `POST /reset-runtime`
 - `POST /unload-models`
+- `POST /open-output-folder`
+- `POST /open-runtime-folder`
+- `POST /open-path`
+- `POST /open-containing-folder`
 - `POST /generate`
 - `POST /cancel`
+
+Use `/runtime?modelBackend=trellis2&runtimeProfile=cu128` to check a specific
+backend/profile. `/status` includes `activeJob` while work is running and
+`lastJob` after completion, including the final `status`, `message`, `outputs`,
+`failedCount`, and `totalCount` fields.
 
 The `/generate` endpoint accepts the same important settings the UI exposes.
 Agents may send partial options; missing values are filled from app defaults.
@@ -215,6 +307,7 @@ Mode values:
 
 Common options:
 
+- `modelBackend`
 - `cudaDevice`
 - `runtimeProfile`
 - `outputDir`
@@ -228,12 +321,34 @@ Common options:
 - `meshSeedMode`
 - `octreeResolution`
 - `numChunks`
+- `reduceFaces`
+- `maxFaces`
 - `textureViewSize`
 - `textureSteps`
 - `textureGuidance`
 - `textureSize`
 - `textureSeed`
 - `textureSeedMode`
+- `trellisResolution`
+- `trellisSparseSteps`
+- `trellisSparseGuidance`
+- `trellisShapeSteps`
+- `trellisShapeGuidance`
+- `trellisTextureSteps`
+- `trellisTextureGuidance`
+- `trellisDecimationTarget`
+- `trellisTextureSize`
+- `trellisRemesh`
+- `trellisExportWebp`
+
+Geometry presets:
+
+- `meshDetail = 'low'` targets about 5k faces and is the default.
+- `meshDetail = 'medium'` targets about 20k faces.
+- `meshDetail = 'high'` targets about 50k faces.
+
+Hunyuan applies the target through `maxFaces` when `reduceFaces` is enabled.
+TRELLIS.2 applies the target through `trellisDecimationTarget`.
 
 Example fast mesh preview request:
 
@@ -263,6 +378,23 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:17333/generate -ContentType
     runtimeProfile = 'cu128'
     outputDir = 'D:\models'
     outputName = 'chair-textured'
+  }
+} | ConvertTo-Json -Depth 6)
+```
+
+Example TRELLIS.2 textured GLB request:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:17333/generate -ContentType 'application/json' -Body (@{
+  paths = @('D:\images\chair.png')
+  options = @{
+    modelBackend = 'trellis2'
+    cudaDevice = '0'
+    runtimeProfile = 'cu128'
+    outputDir = 'D:\models'
+    outputName = 'chair-trellis'
+    trellisTextureSteps = 12
+    trellisExportWebp = $true
   }
 } | ConvertTo-Json -Depth 6)
 ```

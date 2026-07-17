@@ -29,6 +29,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseVoxelSidecar, VoxelDssViewer, type VoxelSidecar } from "./VoxelDssViewer";
 
 type PipelineMode = "meshTexture" | "meshOnly" | "textureOnly";
+type ModelBackend = "hunyuan" | "trellis2";
 type SeedMode = "fixed" | "randomize";
 type MeshDetail = "low" | "medium" | "high" | "custom";
 type QueueStatus = "pending" | "running" | "done" | "error" | "canceled";
@@ -46,6 +47,14 @@ type RuntimeStatus = {
   sourceReady: boolean;
   modelDir: string;
   modelsReady: boolean;
+  selectedBackend: ModelBackend;
+  anyModelsReady: boolean;
+  hunyuanEnvReady: boolean;
+  hunyuanSourceReady: boolean;
+  hunyuanModelsReady: boolean;
+  trellisEnvReady: boolean;
+  trellisSourceReady: boolean;
+  trellisModelsReady: boolean;
   shapeModelReady: boolean;
   paintModelReady: boolean;
   textureWheelsReady: boolean;
@@ -80,7 +89,8 @@ type AgentServerStatus = {
   message: string;
 };
 
-type HunyuanOptions = {
+type ImageTo3DOptions = {
+  modelBackend: ModelBackend;
   mode: PipelineMode;
   cudaDevice: string;
   runtimeProfile: string;
@@ -120,6 +130,25 @@ type HunyuanOptions = {
   cameraElevations: string;
   viewWeights: string;
   orthoScale: number;
+  trellisResolution: number;
+  trellisSeed: number;
+  trellisSeedMode: SeedMode;
+  trellisSparseSteps: number;
+  trellisSparseGuidance: number;
+  trellisSparseRescale: number;
+  trellisSparseRescaleT: number;
+  trellisShapeSteps: number;
+  trellisShapeGuidance: number;
+  trellisShapeRescale: number;
+  trellisShapeRescaleT: number;
+  trellisTextureSteps: number;
+  trellisTextureGuidance: number;
+  trellisTextureRescale: number;
+  trellisTextureRescaleT: number;
+  trellisDecimationTarget: number;
+  trellisTextureSize: number;
+  trellisRemesh: boolean;
+  trellisExportWebp: boolean;
 };
 
 type QueueItem = {
@@ -166,32 +195,58 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.6.21";
-const SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v3";
-const LEGACY_SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
-const AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
-const AGENT_PORT_STORAGE_KEY = "imageToHunyuan3D.agentApiPort.v1";
+const APP_VERSION = "v26.7.16";
+const SETTINGS_STORAGE_KEY = "imageTo3D.settings.v2";
+const PREVIOUS_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v1";
+const LEGACY_SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v3";
+const OLDEST_SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
+const AGENT_STORAGE_KEY = "imageTo3D.agentControlEnabled.v1";
+const LEGACY_AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
+const AGENT_PORT_STORAGE_KEY = "imageTo3D.agentApiPort.v1";
+const LEGACY_AGENT_PORT_STORAGE_KEY = "imageToHunyuan3D.agentApiPort.v1";
 const DEFAULT_AGENT_API_PORT = 17333;
 
-const meshDetailPresets: Record<Exclude<MeshDetail, "custom">, Pick<HunyuanOptions, "meshSteps" | "octreeResolution" | "numChunks">> = {
+const backendLabels: Record<ModelBackend, string> = {
+  hunyuan: "Hunyuan3D 2.1",
+  trellis2: "TRELLIS.2 4B"
+};
+
+const meshDetailPresets: Record<
+  Exclude<MeshDetail, "custom">,
+  Pick<ImageTo3DOptions, "meshSteps" | "octreeResolution" | "numChunks" | "maxFaces" | "trellisDecimationTarget">
+> = {
   low: {
     meshSteps: 24,
     octreeResolution: 256,
-    numChunks: 6000
+    numChunks: 6000,
+    maxFaces: 5000,
+    trellisDecimationTarget: 5000
   },
   medium: {
     meshSteps: 50,
     octreeResolution: 384,
-    numChunks: 8000
+    numChunks: 8000,
+    maxFaces: 20000,
+    trellisDecimationTarget: 20000
   },
   high: {
     meshSteps: 80,
     octreeResolution: 512,
-    numChunks: 12000
+    numChunks: 12000,
+    maxFaces: 50000,
+    trellisDecimationTarget: 50000
   }
 };
 
-const defaultOptions: HunyuanOptions = {
+const meshDetailLabels: Record<MeshDetail, string> = {
+  low: "Low poly (5k)",
+  medium: "Medium (20k)",
+  high: "High (50k)",
+  custom: "Custom"
+};
+
+const defaultOptions: ImageTo3DOptions = {
+  modelBackend: "hunyuan",
   mode: "meshTexture",
   cudaDevice: "auto",
   runtimeProfile: "cu124",
@@ -200,14 +255,14 @@ const defaultOptions: HunyuanOptions = {
   meshInputPath: "",
   recursive: true,
   overwrite: false,
-  meshDetail: "medium",
-  meshSteps: 50,
+  meshDetail: "low",
+  meshSteps: 24,
   meshGuidance: 5,
   meshSeed: 2,
   meshSeedMode: "randomize",
   boxV: 1.01,
-  octreeResolution: 384,
-  numChunks: 8000,
+  octreeResolution: 256,
+  numChunks: 6000,
   mcLevel: 0,
   mcAlgo: "mc",
   enableFlashVdm: true,
@@ -216,7 +271,7 @@ const defaultOptions: HunyuanOptions = {
   removeFloaters: true,
   removeDegenerateFaces: true,
   reduceFaces: true,
-  maxFaces: 15000,
+  maxFaces: 5000,
   smoothNormals: true,
   voxelize: false,
   voxelResolution: 64,
@@ -230,7 +285,26 @@ const defaultOptions: HunyuanOptions = {
   cameraAzimuths: "0, 90, 180, 270, 0, 180",
   cameraElevations: "0, 0, 0, 0, 90, -90",
   viewWeights: "1, 0.1, 0.5, 0.1, 0.05, 0.05",
-  orthoScale: 1.1
+  orthoScale: 1.1,
+  trellisResolution: 1024,
+  trellisSeed: 12345,
+  trellisSeedMode: "randomize",
+  trellisSparseSteps: 12,
+  trellisSparseGuidance: 7.5,
+  trellisSparseRescale: 0.7,
+  trellisSparseRescaleT: 5,
+  trellisShapeSteps: 12,
+  trellisShapeGuidance: 7.5,
+  trellisShapeRescale: 0.5,
+  trellisShapeRescaleT: 3,
+  trellisTextureSteps: 12,
+  trellisTextureGuidance: 3,
+  trellisTextureRescale: 0.5,
+  trellisTextureRescaleT: 3,
+  trellisDecimationTarget: 5000,
+  trellisTextureSize: 1024,
+  trellisRemesh: true,
+  trellisExportWebp: true
 };
 
 const isTauriRuntime = () => "__TAURI_INTERNALS__" in window || "__TAURI__" in window;
@@ -265,6 +339,10 @@ function coerceMode(value: unknown, fallback: PipelineMode): PipelineMode {
     : fallback;
 }
 
+function coerceModelBackend(value: unknown, fallback: ModelBackend): ModelBackend {
+  return value === "trellis2" || value === "hunyuan" ? value : fallback;
+}
+
 function coerceRuntimeProfile(value: unknown, fallback: string) {
   return value === "cu124" || value === "cu128" ? value : fallback;
 }
@@ -277,29 +355,59 @@ function coerceMeshDetail(value: unknown, fallback: MeshDetail): MeshDetail {
   return value === "low" || value === "medium" || value === "high" || value === "custom" ? value : fallback;
 }
 
-function detailFromMeshSettings(options: Pick<HunyuanOptions, "meshSteps" | "octreeResolution" | "numChunks">): MeshDetail {
+function detailFromMeshSettings(
+  options: Pick<ImageTo3DOptions, "meshSteps" | "octreeResolution" | "numChunks" | "maxFaces" | "trellisDecimationTarget">
+): MeshDetail {
   const match = Object.entries(meshDetailPresets).find(
     ([, preset]) =>
       preset.meshSteps === options.meshSteps &&
       preset.octreeResolution === options.octreeResolution &&
-      preset.numChunks === options.numChunks
+      preset.numChunks === options.numChunks &&
+      preset.maxFaces === options.maxFaces &&
+      preset.trellisDecimationTarget === options.trellisDecimationTarget
   );
   return (match?.[0] as MeshDetail | undefined) ?? "custom";
 }
 
-function loadSavedOptions(): HunyuanOptions {
+function applyGeometryPreset(options: ImageTo3DOptions, meshDetail: MeshDetail): ImageTo3DOptions {
+  return meshDetail === "custom"
+    ? { ...options, meshDetail }
+    : { ...options, meshDetail, ...meshDetailPresets[meshDetail] };
+}
+
+function loadSavedOptions(): ImageTo3DOptions {
   if (typeof window === "undefined") return defaultOptions;
   try {
     const saved = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
-    const savedFromLegacyKey = saved === null;
-    const rawSaved = saved ?? window.localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY);
+    const previousSaved = saved === null ? window.localStorage.getItem(PREVIOUS_SETTINGS_STORAGE_KEY) : null;
+    const savedFromPreviousSettingsKey = saved === null && previousSaved !== null;
+    const savedFromLegacyKey = saved === null && previousSaved === null;
+    const rawSaved =
+      saved ??
+      previousSaved ??
+      window.localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY) ??
+      window.localStorage.getItem(OLDEST_SETTINGS_STORAGE_KEY);
     if (!rawSaved) return defaultOptions;
-    const parsed = JSON.parse(rawSaved) as Partial<HunyuanOptions>;
+    const parsed = JSON.parse(rawSaved) as Partial<ImageTo3DOptions>;
     const meshSteps = coerceNumber(parsed.meshSteps, defaultOptions.meshSteps, 1, 200);
     const octreeResolution = coerceNumber(parsed.octreeResolution, defaultOptions.octreeResolution, 64, 2048);
     const numChunks = coerceNumber(parsed.numChunks, defaultOptions.numChunks, 1024, 999999);
-    const inferredMeshDetail = detailFromMeshSettings({ meshSteps, octreeResolution, numChunks });
-    return {
+    const maxFaces = coerceNumber(parsed.maxFaces, defaultOptions.maxFaces, 1000, 200000);
+    const trellisDecimationTarget = coerceNumber(
+      parsed.trellisDecimationTarget,
+      defaultOptions.trellisDecimationTarget,
+      1000,
+      5000000
+    );
+    const inferredMeshDetail = detailFromMeshSettings({
+      meshSteps,
+      octreeResolution,
+      numChunks,
+      maxFaces,
+      trellisDecimationTarget
+    });
+    const loadedOptions: ImageTo3DOptions = {
+      modelBackend: coerceModelBackend(parsed.modelBackend, defaultOptions.modelBackend),
       mode: coerceMode(parsed.mode, defaultOptions.mode),
       cudaDevice: coerceString(parsed.cudaDevice, defaultOptions.cudaDevice),
       runtimeProfile: coerceRuntimeProfile(parsed.runtimeProfile, defaultOptions.runtimeProfile),
@@ -327,7 +435,7 @@ function loadSavedOptions(): HunyuanOptions {
         defaultOptions.removeDegenerateFaces
       ),
       reduceFaces: coerceBoolean(parsed.reduceFaces, defaultOptions.reduceFaces),
-      maxFaces: coerceNumber(parsed.maxFaces, defaultOptions.maxFaces, 1000, 200000),
+      maxFaces,
       smoothNormals: coerceBoolean(parsed.smoothNormals, defaultOptions.smoothNormals),
       voxelize: coerceBoolean(parsed.voxelize, defaultOptions.voxelize),
       voxelResolution: coerceNumber(parsed.voxelResolution, defaultOptions.voxelResolution, 8, 512),
@@ -343,8 +451,39 @@ function loadSavedOptions(): HunyuanOptions {
       cameraAzimuths: coerceString(parsed.cameraAzimuths, defaultOptions.cameraAzimuths),
       cameraElevations: coerceString(parsed.cameraElevations, defaultOptions.cameraElevations),
       viewWeights: coerceString(parsed.viewWeights, defaultOptions.viewWeights),
-      orthoScale: coerceNumber(parsed.orthoScale, defaultOptions.orthoScale, 0.1, 5)
+      orthoScale: coerceNumber(parsed.orthoScale, defaultOptions.orthoScale, 0.1, 5),
+      trellisResolution: coerceNumber(parsed.trellisResolution, defaultOptions.trellisResolution, 512, 1536),
+      trellisSeed: coerceNumber(parsed.trellisSeed, defaultOptions.trellisSeed, 0, 999999999),
+      trellisSeedMode: coerceSeedMode(parsed.trellisSeedMode, defaultOptions.trellisSeedMode),
+      trellisSparseSteps: coerceNumber(parsed.trellisSparseSteps, defaultOptions.trellisSparseSteps, 1, 100),
+      trellisSparseGuidance: coerceNumber(parsed.trellisSparseGuidance, defaultOptions.trellisSparseGuidance, 0, 30),
+      trellisSparseRescale: coerceNumber(parsed.trellisSparseRescale, defaultOptions.trellisSparseRescale, 0, 2),
+      trellisSparseRescaleT: coerceNumber(parsed.trellisSparseRescaleT, defaultOptions.trellisSparseRescaleT, 0, 10),
+      trellisShapeSteps: coerceNumber(parsed.trellisShapeSteps, defaultOptions.trellisShapeSteps, 1, 100),
+      trellisShapeGuidance: coerceNumber(parsed.trellisShapeGuidance, defaultOptions.trellisShapeGuidance, 0, 30),
+      trellisShapeRescale: coerceNumber(parsed.trellisShapeRescale, defaultOptions.trellisShapeRescale, 0, 2),
+      trellisShapeRescaleT: coerceNumber(parsed.trellisShapeRescaleT, defaultOptions.trellisShapeRescaleT, 0, 10),
+      trellisTextureSteps: coerceNumber(parsed.trellisTextureSteps, defaultOptions.trellisTextureSteps, 1, 100),
+      trellisTextureGuidance: coerceNumber(parsed.trellisTextureGuidance, defaultOptions.trellisTextureGuidance, 0, 30),
+      trellisTextureRescale: coerceNumber(parsed.trellisTextureRescale, defaultOptions.trellisTextureRescale, 0, 2),
+      trellisTextureRescaleT: coerceNumber(parsed.trellisTextureRescaleT, defaultOptions.trellisTextureRescaleT, 0, 10),
+      trellisDecimationTarget,
+      trellisTextureSize: coerceNumber(parsed.trellisTextureSize, defaultOptions.trellisTextureSize, 512, 8192),
+      trellisRemesh: coerceBoolean(parsed.trellisRemesh, defaultOptions.trellisRemesh),
+      trellisExportWebp: coerceBoolean(parsed.trellisExportWebp, defaultOptions.trellisExportWebp)
     };
+    if (
+      savedFromPreviousSettingsKey &&
+      (parsed.meshDetail === undefined || parsed.meshDetail === "medium") &&
+      meshSteps === 50 &&
+      octreeResolution === 384 &&
+      numChunks === 8000 &&
+      maxFaces === 15000 &&
+      trellisDecimationTarget === 50000
+    ) {
+      return applyGeometryPreset(loadedOptions, "low");
+    }
+    return loadedOptions;
   } catch {
     return defaultOptions;
   }
@@ -419,13 +558,26 @@ function orderOutputPaths(paths: string[]) {
   });
 }
 
-function runtimeReady(runtime: RuntimeStatus | null, options?: HunyuanOptions) {
+function runtimeReady(runtime: RuntimeStatus | null, options?: ImageTo3DOptions) {
   const profileReady = !options || runtime?.envRuntimeProfile === options.runtimeProfile;
-  return Boolean(runtime?.envReady && runtime.sourceReady && runtime.modelsReady && profileReady);
+  const backend = options?.modelBackend ?? runtime?.selectedBackend ?? "hunyuan";
+  const backendReady = backend === "trellis2"
+    ? runtime?.trellisEnvReady && runtime.trellisSourceReady && runtime.trellisModelsReady
+    : runtime?.hunyuanEnvReady && runtime.hunyuanSourceReady && runtime.hunyuanModelsReady;
+  const textureReady = backend !== "hunyuan" || !options || options.mode === "meshOnly"
+    ? true
+    : runtime?.textureWheelsReady && runtime.realesrganReady;
+  return Boolean(runtime?.envReady && profileReady && backendReady && textureReady);
 }
 
-function runtimeNeedsSetup(runtime: RuntimeStatus | null, options?: HunyuanOptions) {
+function runtimeNeedsSetup(runtime: RuntimeStatus | null, options?: ImageTo3DOptions) {
   return Boolean(runtime && !runtimeReady(runtime, options));
+}
+
+function backendRuntimeReady(runtime: RuntimeStatus | null, backend: ModelBackend) {
+  return backend === "trellis2"
+    ? Boolean(runtime?.trellisEnvReady && runtime.trellisSourceReady && runtime.trellisModelsReady)
+    : Boolean(runtime?.hunyuanEnvReady && runtime.hunyuanSourceReady && runtime.hunyuanModelsReady);
 }
 
 function formatBytes(value?: number | null) {
@@ -442,7 +594,8 @@ function formatBytes(value?: number | null) {
 }
 
 function formatWorkerMessage(payload: WorkerEvent) {
-  if (payload.type !== "download_progress") return payload.message;
+  if (payload.message && isTerminalProgressLine(payload.message)) return undefined;
+  if (payload.type !== "download_progress") return cleanWorkerMessage(payload.message);
   const label = payload.message || (payload.name ? `Downloading ${payload.name}` : "Downloading");
   if (typeof payload.percent === "number" && payload.itemsTotal) {
     return `${label}: ${payload.percent}% (${payload.itemsDownloaded ?? 0} of ${payload.itemsTotal} files)`;
@@ -464,15 +617,35 @@ function formatWorkerMessage(payload: WorkerEvent) {
   return label;
 }
 
+function cleanWorkerMessage(message?: string) {
+  const stripped = message
+    ?.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\r/g, " ")
+    .trim();
+  return stripped || undefined;
+}
+
+function isTerminalProgressLine(message: string) {
+  const stripped = message.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "");
+  if (stripped.includes("\r") && (stripped.includes("%") || stripped.includes("|"))) return true;
+  const compact = stripped.replace(/\s+/g, " ").trim();
+  if (!compact) return true;
+  const hasProgressShape = /\b\d+%\b|\b\d+\/\d+\b|\[[0-9:<>,.?it/s ]+\]/.test(compact) || compact.includes("|");
+  return (
+    hasProgressShape &&
+    /^(Sampling|Simplifying|Building Sparse Grid|Adding clusters|Gathering results|xatlas:)/.test(compact)
+  );
+}
+
 function App() {
-  const [options, setOptions] = useState<HunyuanOptions>(loadSavedOptions);
+  const [options, setOptions] = useState<ImageTo3DOptions>(loadSavedOptions);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [vram, setVram] = useState<VramStatus | null>(null);
   const [agentControlEnabled, setAgentControlEnabled] = useState(
-    () => window.localStorage.getItem(AGENT_STORAGE_KEY) === "1"
+    () => (window.localStorage.getItem(AGENT_STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_AGENT_STORAGE_KEY)) === "1"
   );
   const [agentPort, setAgentPort] = useState(
-    () => window.localStorage.getItem(AGENT_PORT_STORAGE_KEY) ?? String(DEFAULT_AGENT_API_PORT)
+    () => window.localStorage.getItem(AGENT_PORT_STORAGE_KEY) ?? window.localStorage.getItem(LEGACY_AGENT_PORT_STORAGE_KEY) ?? String(DEFAULT_AGENT_API_PORT)
   );
   const [agentStatus, setAgentStatus] = useState<AgentServerStatus | null>(null);
   const [queue, setQueue] = useState<QueueItem[]>([]);
@@ -498,6 +671,10 @@ function App() {
     [options.cudaDevice, vram]
   );
   const shouldRecommendCu128 = Boolean(rtx50RecommendationGpu && options.runtimeProfile !== "cu128");
+  const selectedBackendLabel = backendLabels[options.modelBackend];
+  const isHunyuanBackend = options.modelBackend === "hunyuan";
+  const isTrellisBackend = options.modelBackend === "trellis2";
+  const anyBackendInstalled = Boolean(runtime?.anyModelsReady || runtime?.hunyuanModelsReady || runtime?.trellisModelsReady);
   const completeCount = useMemo(() => queue.filter((item) => item.status === "done").length, [queue]);
   const errorCount = useMemo(() => queue.filter((item) => item.status === "error").length, [queue]);
   const selectedItem = useMemo(
@@ -512,13 +689,18 @@ function App() {
     () => (selectedModel && isTauriRuntime() ? convertFileSrc(selectedModel) : ""),
     [selectedModel]
   );
+  const previewHint = selectedModel
+    ? fileName(selectedModel)
+    : busy
+      ? "Preview appears when generation finishes"
+      : "Drop a GLB to preview";
   const canUseDssPreview = Boolean(voxelSidecar);
   const showDssPreview = Boolean(modelUrl && dssPreviewEnabled && voxelSidecar);
   const canStart = useMemo(() => {
     if (busy || queue.length === 0) return false;
-    if (options.mode === "textureOnly" && !options.meshInputPath) return false;
+    if (options.modelBackend === "hunyuan" && options.mode === "textureOnly" && !options.meshInputPath) return false;
     return true;
-  }, [busy, options.meshInputPath, options.mode, queue.length]);
+  }, [busy, options.meshInputPath, options.mode, options.modelBackend, queue.length]);
 
   const pushLog = useCallback((line: string) => {
     setLog((current) => [line, ...current].slice(0, 120));
@@ -526,10 +708,13 @@ function App() {
 
   const refreshRuntime = useCallback(async () => {
     if (!isTauriRuntime()) return;
-    const status = await invoke<RuntimeStatus>("check_runtime", { runtimeProfile: options.runtimeProfile });
+    const status = await invoke<RuntimeStatus>("check_runtime", {
+      runtimeProfile: options.runtimeProfile,
+      modelBackend: options.modelBackend
+    });
     setRuntime(status);
     return status;
-  }, [options.runtimeProfile]);
+  }, [options.modelBackend, options.runtimeProfile]);
 
   const refreshVram = useCallback(async () => {
     if (!isTauriRuntime()) return;
@@ -705,10 +890,11 @@ function App() {
   }, [agentControlEnabled, pushLog]);
 
   useEffect(() => {
-    if (!runtimeNeedsSetup(runtime, options) || busy || setupPromptSeenRef.current) return;
+    if (!runtime || busy) return;
+    if (anyBackendInstalled || setupPromptSeenRef.current) return;
     setupPromptSeenRef.current = true;
     setShowSetupPrompt(true);
-  }, [busy, options, runtime]);
+  }, [anyBackendInstalled, busy, options.modelBackend, runtime]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -745,15 +931,15 @@ function App() {
         setHeadline(workerMessage);
       }
       if (payload.type === "image_start" && payload.path) {
-        setHeadline(payload.message ?? `Processing ${fileName(payload.path)}`);
+        setHeadline(workerMessage ?? `Processing ${fileName(payload.path)}`);
         setQueue((current) =>
           current.map((item) =>
             item.path === payload.path ? { ...item, status: "running", message: "Running" } : item
           )
         );
       }
-      if (payload.type === "stage_start" || payload.type === "model" || payload.type === "setup") {
-        setHeadline(payload.message ?? "Working");
+      if ((payload.type === "stage_start" || payload.type === "model" || payload.type === "setup") && workerMessage) {
+        setHeadline(workerMessage);
       }
       if (payload.type === "image_done" && payload.path) {
         const outputs = orderOutputPaths(parseOutputPaths(payload.output, payload.outputs));
@@ -767,7 +953,7 @@ function App() {
               ? {
                   ...item,
                   status: "done",
-                  message: payload.message ?? "Saved",
+                  message: workerMessage ?? payload.message ?? "Saved",
                   outputHistory: [...outputs, ...(item.outputHistory ?? [])]
                 }
               : item
@@ -779,7 +965,7 @@ function App() {
         setQueue((current) =>
           current.map((item) =>
             item.path === payload.path
-              ? { ...item, status: "error", message: payload.message ?? "Error" }
+              ? { ...item, status: "error", message: workerMessage ?? payload.message ?? "Error" }
               : item
           )
         );
@@ -787,7 +973,7 @@ function App() {
       if (payload.type === "done" || payload.type === "runtime_ready") {
         setBusy(false);
         setCanceling(false);
-        setHeadline(activeActionRef.current === "setup" ? "Runtime ready" : payload.message ?? "Batch complete");
+        setHeadline(activeActionRef.current === "setup" ? "Runtime ready" : workerMessage ?? payload.message ?? "Batch complete");
         activeActionRef.current = null;
         void refreshRuntime().catch(() => undefined);
         void refreshVram().catch(() => undefined);
@@ -796,7 +982,7 @@ function App() {
         setBusy(false);
         setCanceling(false);
         activeActionRef.current = null;
-        setHeadline(payload.type === "canceled" ? "Canceled" : "Worker error");
+        setHeadline(payload.type === "canceled" ? "Canceled" : workerMessage ?? "Worker error");
       }
     }).then((unlisten) => {
       cleanup = unlisten;
@@ -896,27 +1082,33 @@ function App() {
     );
     if (!confirmed) return;
     try {
-      const status = await invoke<RuntimeStatus>("reset_python_runtime", { runtimeProfile: options.runtimeProfile });
+      const status = await invoke<RuntimeStatus>("reset_python_runtime", {
+        runtimeProfile: options.runtimeProfile,
+        modelBackend: options.modelBackend
+      });
       setRuntime(status);
       pushLog(`${runtimeProfileLabel(options.runtimeProfile)} runtime reset. Choose Prepare to reinstall it.`);
       setHeadline("Python runtime reset");
     } catch (error) {
       pushLog(String(error));
     }
-  }, [busy, options.runtimeProfile, pushLog]);
+  }, [busy, options.modelBackend, options.runtimeProfile, pushLog]);
 
   const unloadModels = useCallback(async () => {
     if (!isTauriRuntime() || busy) return;
     try {
-      const status = await invoke<RuntimeStatus>("unload_models", { runtimeProfile: options.runtimeProfile });
+      const status = await invoke<RuntimeStatus>("unload_models", {
+        runtimeProfile: options.runtimeProfile,
+        modelBackend: options.modelBackend
+      });
       setRuntime(status);
       void refreshVram().catch(() => undefined);
       setHeadline("Loaded models unloaded");
-      pushLog("Unloaded warm Hunyuan models. The next generation will reload them.");
+      pushLog(`Unloaded warm ${selectedBackendLabel} models. The next generation will reload them.`);
     } catch (error) {
       pushLog(String(error));
     }
-  }, [busy, options.runtimeProfile, pushLog, refreshVram]);
+  }, [busy, options.modelBackend, options.runtimeProfile, pushLog, refreshVram, selectedBackendLabel]);
 
   const chooseMeshInput = useCallback(async () => {
     const selected = await openDialog({
@@ -945,7 +1137,7 @@ function App() {
     setBusy(true);
     setCanceling(false);
     activeActionRef.current = "setup";
-    setHeadline("Preparing standalone runtime");
+    setHeadline(`Preparing ${selectedBackendLabel}`);
     try {
       await invoke("prepare_runtime", { options });
     } catch (error) {
@@ -954,7 +1146,7 @@ function App() {
       setHeadline("Could not prepare runtime");
       pushLog(String(error));
     }
-  }, [busy, options, pushLog]);
+  }, [busy, options, pushLog, selectedBackendLabel]);
 
   const start = useCallback(async () => {
     if (!canStart || !isTauriRuntime()) return;
@@ -966,24 +1158,38 @@ function App() {
     setBusy(true);
     setCanceling(false);
     activeActionRef.current = "generate";
-    setQueue((current) => current.map((item) => ({ ...item, status: "pending", message: undefined })));
-    setHeadline(runtimeReady(runtime, options) ? "Starting Hunyuan job" : "Preparing runtime first");
+    const startingMessage = runtimeReady(runtime, options)
+      ? `Loading ${selectedBackendLabel} model`
+      : "Preparing runtime first";
+    setQueue((current) =>
+      current.map((item, index) => ({
+        ...item,
+        status: index === 0 ? "running" : "pending",
+        message: index === 0 ? startingMessage : undefined
+      }))
+    );
+    setHeadline(startingMessage);
     try {
       const jobOptions = {
         ...options,
         outputDir: options.outputDir.trim() || runtime?.outputDir || ""
       };
-      await invoke("start_hunyuan_job", {
+      await invoke("start_generation_job", {
         paths: queueRef.current.map((item) => item.path),
         options: jobOptions
       });
     } catch (error) {
       setBusy(false);
       activeActionRef.current = null;
+      setQueue((current) =>
+        current.map((item) =>
+          item.status === "running" ? { ...item, status: "pending", message: undefined } : item
+        )
+      );
       setHeadline("Could not start job");
       pushLog(String(error));
     }
-  }, [canStart, options, pushLog, runtime]);
+  }, [canStart, options, pushLog, runtime, selectedBackendLabel]);
 
   const cancelActiveJob = useCallback(async () => {
     if (!isTauriRuntime()) return;
@@ -1039,8 +1245,11 @@ function App() {
       <main className="app-shell">
         <aside className="sidebar">
           <section className="brand">
-            <h1>Image To Hunyuan 3D</h1>
-            <p>Standalone local Hunyuan3D 2.1 workstation</p>
+            <div className="brand-heading">
+              <h1>Image To 3D</h1>
+              <span className="app-version">{APP_VERSION}</span>
+            </div>
+            <p>Standalone local image-to-3D workstation</p>
           </section>
 
           <section className="panel">
@@ -1048,6 +1257,24 @@ function App() {
               <Settings2 size={16} />
               Pipeline
             </div>
+            <label className="field">
+              <span>Model</span>
+              <select
+                value={options.modelBackend}
+                disabled={busy}
+                onChange={(event) =>
+                  setOptions((current) => ({
+                    ...current,
+                    modelBackend: event.target.value as ModelBackend,
+                    mode: event.target.value === "trellis2" ? "meshTexture" : current.mode
+                  }))
+                }
+              >
+                <option value="hunyuan">Hunyuan3D 2.1 mesh/PBR</option>
+                <option value="trellis2">TRELLIS.2 4B O-Voxel/PBR</option>
+              </select>
+            </label>
+            {isHunyuanBackend ? (
             <div className="mode-tabs" role="tablist" aria-label="Pipeline mode">
               {[
                 ["meshTexture", "Mesh + Texture"],
@@ -1063,8 +1290,11 @@ function App() {
                 </button>
               ))}
             </div>
+            ) : (
+              <div className="backend-note">Single-image GLB with PBR materials</div>
+            )}
 
-            {options.mode === "textureOnly" ? (
+            {isHunyuanBackend && options.mode === "textureOnly" ? (
               <div className="path-row">
                 <label className="field">
                   <span>Source mesh</span>
@@ -1152,29 +1382,27 @@ function App() {
             ) : null}
           </section>
 
+          {isHunyuanBackend ? (
+          <>
           <section className="panel">
             <div className="panel-title">
               <Box size={16} />
               Mesh
             </div>
             <label className="field">
-              <span>Detail</span>
+              <span>Geometry</span>
               <select
                 value={options.meshDetail}
                 disabled={options.mode === "textureOnly"}
                 onChange={(event) => {
                   const meshDetail = event.target.value as MeshDetail;
-                  setOptions((current) =>
-                    meshDetail === "custom"
-                      ? { ...current, meshDetail }
-                      : { ...current, meshDetail, ...meshDetailPresets[meshDetail] }
-                  );
+                  setOptions((current) => applyGeometryPreset(current, meshDetail));
                 }}
               >
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-                <option value="custom">Custom</option>
+                <option value="low">{meshDetailLabels.low}</option>
+                <option value="medium">{meshDetailLabels.medium}</option>
+                <option value="high">{meshDetailLabels.high}</option>
+                <option value="custom">{meshDetailLabels.custom}</option>
               </select>
             </label>
             <div className="split-fields">
@@ -1232,23 +1460,41 @@ function App() {
                 />
               </label>
               <label className="field">
-                <span>Chunks</span>
+                <span>Faces</span>
                 <input
                   type="number"
-                  min="1024"
-                  max="999999"
-                  value={options.numChunks}
+                  min="1000"
+                  max="200000"
+                  step="1000"
+                  value={options.maxFaces}
                   disabled={options.mode === "textureOnly"}
                   onChange={(event) =>
                     setOptions((current) => ({
                       ...current,
                       meshDetail: "custom",
-                      numChunks: Number(event.target.value) || current.numChunks
+                      maxFaces: Number(event.target.value) || current.maxFaces
                     }))
                   }
                 />
               </label>
             </div>
+            <label className="field">
+              <span>Chunks</span>
+              <input
+                type="number"
+                min="1024"
+                max="999999"
+                value={options.numChunks}
+                disabled={options.mode === "textureOnly"}
+                onChange={(event) =>
+                  setOptions((current) => ({
+                    ...current,
+                    meshDetail: "custom",
+                    numChunks: Number(event.target.value) || current.numChunks
+                  }))
+                }
+              />
+            </label>
             <div className="seed-row">
               <label className="field">
                 <span>Seed</span>
@@ -1467,14 +1713,201 @@ function App() {
               <span>UV unwrap before texture</span>
             </label>
           </section>
+          </>
+          ) : (
+          <section className="panel">
+            <div className="panel-title">
+              <Box size={16} />
+              TRELLIS.2
+            </div>
+            <label className="field">
+              <span>Resolution</span>
+              <select
+                value={options.trellisResolution}
+                onChange={(event) =>
+                  setOptions((current) => ({ ...current, trellisResolution: Number(event.target.value) || 1024 }))
+                }
+              >
+                <option value={512}>512</option>
+                <option value={1024}>1024 cascade</option>
+                <option value={1536}>1536 cascade</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Geometry</span>
+              <select
+                value={options.meshDetail}
+                onChange={(event) => {
+                  const meshDetail = event.target.value as MeshDetail;
+                  setOptions((current) => applyGeometryPreset(current, meshDetail));
+                }}
+              >
+                <option value="low">{meshDetailLabels.low}</option>
+                <option value="medium">{meshDetailLabels.medium}</option>
+                <option value="high">{meshDetailLabels.high}</option>
+                <option value="custom">{meshDetailLabels.custom}</option>
+              </select>
+            </label>
+            <div className="seed-row">
+              <label className="field">
+                <span>Seed</span>
+                <input
+                  type="number"
+                  value={options.trellisSeed}
+                  disabled={options.trellisSeedMode === "randomize"}
+                  onChange={(event) =>
+                    setOptions((current) => ({ ...current, trellisSeed: Number(event.target.value) || current.trellisSeed }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Mode</span>
+                <select
+                  value={options.trellisSeedMode}
+                  onChange={(event) => setOptions((current) => ({ ...current, trellisSeedMode: event.target.value as SeedMode }))}
+                >
+                  <option value="randomize">Random</option>
+                  <option value="fixed">Fixed</option>
+                </select>
+              </label>
+            </div>
+            <div className="split-fields">
+              <label className="field">
+                <span>Sparse steps</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={options.trellisSparseSteps}
+                  onChange={(event) =>
+                    setOptions((current) => ({ ...current, trellisSparseSteps: Number(event.target.value) || current.trellisSparseSteps }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Sparse CFG</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="30"
+                  step="0.1"
+                  value={options.trellisSparseGuidance}
+                  onChange={(event) =>
+                    setOptions((current) => ({ ...current, trellisSparseGuidance: Number(event.target.value) || current.trellisSparseGuidance }))
+                  }
+                />
+              </label>
+            </div>
+            <div className="split-fields">
+              <label className="field">
+                <span>Shape steps</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={options.trellisShapeSteps}
+                  onChange={(event) =>
+                    setOptions((current) => ({ ...current, trellisShapeSteps: Number(event.target.value) || current.trellisShapeSteps }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Shape CFG</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="30"
+                  step="0.1"
+                  value={options.trellisShapeGuidance}
+                  onChange={(event) =>
+                    setOptions((current) => ({ ...current, trellisShapeGuidance: Number(event.target.value) || current.trellisShapeGuidance }))
+                  }
+                />
+              </label>
+            </div>
+            <div className="split-fields">
+              <label className="field">
+                <span>Texture steps</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={options.trellisTextureSteps}
+                  onChange={(event) =>
+                    setOptions((current) => ({ ...current, trellisTextureSteps: Number(event.target.value) || current.trellisTextureSteps }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Texture CFG</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="30"
+                  step="0.1"
+                  value={options.trellisTextureGuidance}
+                  onChange={(event) =>
+                    setOptions((current) => ({ ...current, trellisTextureGuidance: Number(event.target.value) || current.trellisTextureGuidance }))
+                  }
+                />
+              </label>
+            </div>
+            <div className="split-fields">
+              <label className="field">
+                <span>Faces</span>
+                <input
+                  type="number"
+                  min="1000"
+                  max="5000000"
+                  step="1000"
+                  value={options.trellisDecimationTarget}
+                  onChange={(event) =>
+                    setOptions((current) => ({
+                      ...current,
+                      meshDetail: "custom",
+                      trellisDecimationTarget: Number(event.target.value) || current.trellisDecimationTarget
+                    }))
+                  }
+                />
+              </label>
+              <label className="field">
+                <span>Texture</span>
+                <input
+                  type="number"
+                  min="512"
+                  max="8192"
+                  value={options.trellisTextureSize}
+                  onChange={(event) =>
+                    setOptions((current) => ({ ...current, trellisTextureSize: Number(event.target.value) || current.trellisTextureSize }))
+                  }
+                />
+              </label>
+            </div>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={options.trellisRemesh}
+                onChange={(event) => setOptions((current) => ({ ...current, trellisRemesh: event.target.checked }))}
+              />
+              <span>Remesh GLB export</span>
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={options.trellisExportWebp}
+                onChange={(event) => setOptions((current) => ({ ...current, trellisExportWebp: event.target.checked }))}
+              />
+              <span>Use WebP textures</span>
+            </label>
+          </section>
+          )}
 
-          <div className="app-version">{APP_VERSION}</div>
         </aside>
 
         <section className="workspace">
           <header className="topbar">
             <div>
-              <p className="eyebrow">Standalone NVIDIA pipeline</p>
+              <p className="eyebrow">{selectedBackendLabel}</p>
               <h2>{headline}</h2>
             </div>
             <div className="actions">
@@ -1543,7 +1976,9 @@ function App() {
               </div>
               <div className="input-panel-note">
                 <p>
-                  {options.mode === "meshOnly" ? "Mesh GLBs" : "Textured GLBs"} are generated by the app-managed Hunyuan runtime.
+                  {isTrellisBackend
+                    ? "Textured GLBs are generated by the app-managed TRELLIS.2 runtime."
+                    : `${options.mode === "meshOnly" ? "Mesh GLBs" : "Textured GLBs"} are generated by the app-managed Hunyuan runtime.`}
                 </p>
               </div>
             </section>
@@ -1552,7 +1987,7 @@ function App() {
               <div className="preview-head">
                 <div className="preview-title">
                   <strong>3D Preview</strong>
-                  <small>{selectedModel ? fileName(selectedModel) : "Drop a GLB to preview"}</small>
+                  <small>{previewHint}</small>
                 </div>
                 {selectedModel ? (
                   <button
@@ -1582,7 +2017,7 @@ function App() {
                 ) : (
                   <div className="preview-empty">
                     <Layers3 size={30} />
-                    Drop a GLB here
+                    {busy ? "Generating preview" : "Drop a GLB here"}
                   </div>
                 )}
               </div>
@@ -1728,6 +2163,9 @@ function App() {
                 </div>
               ) : null}
               <div className="runtime-status">
+                <p className={backendRuntimeReady(runtime, options.modelBackend) ? "ok" : "warn"}>
+                  Model: {selectedBackendLabel}
+                </p>
                 <p className={runtime?.nvidiaGpuFound ? "ok" : "warn"}>
                   NVIDIA: {runtime?.nvidiaGpuFound ? "detected" : "not detected"}
                 </p>
@@ -1746,8 +2184,16 @@ function App() {
                 <p className={runtime?.modelsReady ? "ok" : "warn"}>
                   Models: {runtime?.modelsReady ? "ready" : "not downloaded"}
                 </p>
-                <p className={runtime?.textureWheelsReady && runtime?.realesrganReady ? "ok" : "warn"}>
-                  Texture: {runtime?.textureWheelsReady && runtime?.realesrganReady ? "ready" : "setup needed"}
+                {isHunyuanBackend ? (
+                  <p className={runtime?.textureWheelsReady && runtime?.realesrganReady ? "ok" : "warn"}>
+                    Texture: {runtime?.textureWheelsReady && runtime?.realesrganReady ? "ready" : "setup needed"}
+                  </p>
+                ) : null}
+                <p className={runtime?.hunyuanModelsReady ? "ok" : "warn"}>
+                  Hunyuan: {runtime?.hunyuanModelsReady ? "installed" : "not installed"}
+                </p>
+                <p className={runtime?.trellisModelsReady ? "ok" : "warn"}>
+                  TRELLIS.2: {runtime?.trellisModelsReady ? "installed" : "not installed"}
                 </p>
               </div>
             </div>
@@ -1803,12 +2249,29 @@ function App() {
             </div>
             <div className="setup-modal-copy">
               <p className="eyebrow">One-time setup</p>
-              <h2 id="setup-title">Image To Hunyuan 3D needs local models</h2>
+              <h2 id="setup-title">Image To 3D needs local models</h2>
               <p>
-                Before it can generate 3D models, the app needs to create its own local runtime and download the
-                Hunyuan3D model files. Nothing starts downloading until you choose setup.
+                Before it can generate 3D models, the app needs to create a local runtime and download the selected
+                model files. Nothing starts downloading until you choose setup.
               </p>
               <div className="setup-runtime-options">
+                <label className="field">
+                  <span>Model</span>
+                  <select
+                    value={options.modelBackend}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setOptions((current) => ({
+                        ...current,
+                        modelBackend: event.target.value as ModelBackend,
+                        mode: event.target.value === "trellis2" ? "meshTexture" : current.mode
+                      }))
+                    }
+                  >
+                    <option value="hunyuan">Hunyuan3D 2.1</option>
+                    <option value="trellis2">TRELLIS.2 4B</option>
+                  </select>
+                </label>
                 <label className="field">
                   <span>CUDA GPU</span>
                   <select
@@ -1860,21 +2323,23 @@ function App() {
                   App runtime: {runtime?.envReady ? "ready" : "not set up"}
                 </span>
                 <span className={runtime?.sourceReady ? "ok" : "warn"}>
-                  Hunyuan source: {runtime?.sourceReady ? "ready" : "download needed"}
+                  {selectedBackendLabel} source: {runtime?.sourceReady ? "ready" : "download needed"}
                 </span>
                 <span className={runtime?.modelsReady ? "ok" : "warn"}>
-                  Models: {runtime?.modelsReady ? "ready" : "download needed"}
+                  {selectedBackendLabel} models: {runtime?.modelsReady ? "ready" : "download needed"}
                 </span>
+                {isHunyuanBackend ? (
                 <span className={runtime?.textureWheelsReady && runtime?.realesrganReady ? "ok" : "warn"}>
                   Texture tools: {runtime?.textureWheelsReady && runtime?.realesrganReady ? "ready" : "setup needed"}
                 </span>
+                ) : null}
                 <span className={runtime?.nvidiaGpuFound ? "ok" : "warn"}>
                   NVIDIA GPU: {runtime?.nvidiaGpuFound ? "detected" : "not detected"}
                 </span>
               </div>
               <p className="setup-note">
-                This is a large first-run download and install. It can take a while, and the app is designed for NVIDIA
-                GPUs.
+                This is a large first-run download and install. TRELLIS.2 currently follows Microsoft&apos;s Linux/CUDA
+                runtime requirements and may need build tools for native extensions.
               </p>
             </div>
             <div className="setup-actions">

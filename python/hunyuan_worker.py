@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import platform
@@ -33,22 +34,36 @@ def configure_text_streams() -> None:
 configure_text_streams()
 os.environ.setdefault("PYTHONUTF8", "1")
 os.environ.setdefault("PYTHONIOENCODING", "utf-8:replace")
+os.environ.setdefault("TQDM_DISABLE", "1")
 os.environ.pop("TQDM_ASCII", None)
 
 
+APP_NAME = "Image To 3D"
 HUNYUAN_REPO = "Tencent-Hunyuan/Hunyuan3D-2.1"
 HUNYUAN_SOURCE_URL = "https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1/archive/refs/heads/main.zip"
 WHEEL_SOURCE_URL = "https://github.com/visualbruno/ComfyUI-Hunyuan3d-2-1/archive/refs/heads/main.zip"
 REALESRGAN_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
 MODEL_REPO = "tencent/Hunyuan3D-2.1"
 DINO_REPO = "facebook/dinov2-giant"
+TRELLIS_REPO = "microsoft/TRELLIS.2"
+TRELLIS_SOURCE_URL = "https://github.com/microsoft/TRELLIS.2.git"
+TRELLIS_MODEL_REPO = "microsoft/TRELLIS.2-4B"
+TRELLIS_DINOV3_REPO = "facebook/dinov3-vitl16-pretrain-lvd1689m"
+TRELLIS_REMBG_REPO = "briaai/RMBG-2.0"
 ENV_MARKER = ".ih3d-env-v4-ready"
-SOURCE_MARKER = ".ih3d-source-v1-ready"
-MODEL_MARKER = ".ih3d-models-v1-ready"
+HUNYUAN_SOURCE_MARKER = ".ih3d-source-v1-ready"
+HUNYUAN_MODEL_MARKER = ".ih3d-models-v1-ready"
+TRELLIS_SOURCE_MARKER = ".i3d-trellis-source-v1-ready"
+TRELLIS_MODEL_MARKER = ".i3d-trellis-models-v3-ready"
+HUNYUAN_ENV_MARKER = ".i3d-hunyuan-env-v2-ready"
+TRELLIS_ENV_MARKER = ".i3d-trellis-env-v2-ready"
 WHEEL_MARKER = ".ih3d-texture-wheels-v1-ready"
 VOXEL_DSS_SIDECAR_MAX_CELLS = 300_000
 BOOTSTRAP_PACKAGES = ["pip>=24.3", "setuptools<81", "wheel>=0.43"]
 DEFAULT_PYTORCH_PROFILE = "cu124"
+TRANSFORMERS_PIN = "transformers==5.12.1"
+HUGGINGFACE_HUB_PIN = "huggingface-hub==1.19.0"
+TOKENIZERS_PIN = "tokenizers==0.22.2"
 PYTORCH_RUNTIME_PROFILES = {
     "cu124": {
         "label": "PyTorch CUDA 12.4",
@@ -77,11 +92,12 @@ COMPAT_PACKAGES = [
 HUNYUAN_RUNTIME_PACKAGES = [
     "ninja==1.11.1.1",
     "pybind11==2.13.4",
-    "transformers==4.46.0",
+    TRANSFORMERS_PIN,
     "diffusers==0.30.0",
     "accelerate==1.1.1",
     "pytorch-lightning==1.9.5",
-    "huggingface-hub==0.30.2",
+    HUGGINGFACE_HUB_PIN,
+    TOKENIZERS_PIN,
     "safetensors==0.4.4",
     "scipy==1.14.1",
     "einops==0.8.0",
@@ -105,8 +121,37 @@ HUNYUAN_RUNTIME_PACKAGES = [
     "timm",
     "torchdiffeq",
 ]
+TRELLIS_BASIC_PACKAGES = [
+    "imageio",
+    "imageio-ffmpeg",
+    "tqdm",
+    "easydict",
+    "opencv-python-headless",
+    "ninja",
+    "trimesh",
+    TRANSFORMERS_PIN,
+    HUGGINGFACE_HUB_PIN,
+    TOKENIZERS_PIN,
+    "tensorboard",
+    "pandas",
+    "lpips",
+    "zstandard",
+    "kornia",
+    "timm",
+    "igraph",
+    "pymeshfix",
+    "xatlas",
+]
+TRELLIS_UTILS3D_PACKAGE = "git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8"
+TRELLIS_EXTENSION_REPOS = {
+    "nvdiffrast": ("https://github.com/NVlabs/nvdiffrast.git", "v0.4.0"),
+    "nvdiffrec": ("https://github.com/JeffreyXiang/nvdiffrec.git", "renderutils"),
+    "CuMesh": ("https://github.com/JeffreyXiang/CuMesh.git", None),
+    "FlexGEMM": ("https://github.com/JeffreyXiang/FlexGEMM.git", None),
+}
 MESH_EXTENSIONS = {".glb", ".gltf", ".obj", ".ply"}
 PYTHON_VERSION_RE = re.compile(r"Python\s+(\d+)\.(\d+)\.(\d+)")
+MSVC_ENV_CACHE: dict[str, str] | None = None
 
 
 def normalize_pytorch_profile(value: Any) -> str:
@@ -128,6 +173,36 @@ def env_marker_profile(marker: Path) -> str | None:
         if key.strip() == "pytorch":
             return normalize_pytorch_profile(value)
     return None
+
+
+def env_marker_value(marker: Path, wanted_key: str) -> str | None:
+    if not marker.exists():
+        return None
+    try:
+        text = marker.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == wanted_key:
+            return value.strip()
+    return None
+
+
+def env_marker_flavor(marker: Path) -> str | None:
+    value = env_marker_value(marker, "runtime")
+    if value:
+        return value
+    if marker.exists():
+        return "legacy-full"
+    return None
+
+
+def normalize_model_backend(value: Any) -> str:
+    backend = str(value or "hunyuan").strip()
+    if backend in {"trellis", "trellis2"}:
+        return "trellis2"
+    return "hunyuan"
 
 
 def env_dir_for_profile(app_data_dir: Path, pytorch_profile: Any = None) -> Path:
@@ -164,16 +239,51 @@ def emit_timing(stage: str, started: float, path: str | None = None) -> None:
 
 def app_paths(app_data_dir: Path, pytorch_profile: Any = None) -> dict[str, Path]:
     runtime_dir = app_data_dir / "runtime"
+    configured_model_dir = os.environ.get("I3D_MODEL_DIR") or os.environ.get("IH3D_MODEL_DIR")
+    model_dir = Path(configured_model_dir) if configured_model_dir else app_data_dir / "models"
     return {
         "app_data": app_data_dir,
+        "cache_dir": app_data_dir / "cache",
+        "tmp_dir": app_data_dir / "tmp",
         "env_dir": env_dir_for_profile(app_data_dir, pytorch_profile),
         "runtime_dir": runtime_dir,
         "source_dir": runtime_dir / "Hunyuan3D-2.1",
+        "hunyuan_source_dir": runtime_dir / "Hunyuan3D-2.1",
+        "trellis_source_dir": runtime_dir / "TRELLIS.2",
+        "trellis_extensions_dir": runtime_dir / "trellis-extensions",
         "wheel_source_dir": runtime_dir / "ComfyUI-Hunyuan3d-2-1-wheels",
-        "model_dir": app_data_dir / "models",
+        "model_dir": model_dir,
         "output_dir": app_data_dir / "outputs",
         "jobs_dir": app_data_dir / "jobs",
     }
+
+
+def configure_portable_cache_env(paths: dict[str, Path], env: dict[str, str] | None = None) -> dict[str, str]:
+    target = env if env is not None else os.environ
+    cache_dir = paths["cache_dir"]
+    tmp_dir = paths["tmp_dir"]
+    pip_cache = cache_dir / "pip"
+    hf_home = paths["model_dir"] / "huggingface"
+    hy3dgen_cache = paths["model_dir"] / "hy3dgen"
+    matplotlib_cache = cache_dir / "matplotlib"
+    flex_gemm_cache = cache_dir / "flex_gemm"
+    triton_cache = cache_dir / "triton"
+    for folder in (cache_dir, tmp_dir, pip_cache, hf_home, hy3dgen_cache, matplotlib_cache, flex_gemm_cache, triton_cache):
+        folder.mkdir(parents=True, exist_ok=True)
+    target["PIP_CACHE_DIR"] = str(pip_cache)
+    target["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    target["XDG_CACHE_HOME"] = str(cache_dir)
+    target["HF_HOME"] = str(hf_home)
+    target["HF_HUB_CACHE"] = str(hf_home / "hub")
+    target["TRANSFORMERS_CACHE"] = str(hf_home / "transformers")
+    target["HY3DGEN_MODELS"] = str(hy3dgen_cache)
+    target["MPLCONFIGDIR"] = str(matplotlib_cache)
+    target["FLEX_GEMM_CACHE_DIR"] = str(flex_gemm_cache)
+    target["TRITON_CACHE_DIR"] = str(triton_cache)
+    target["TMPDIR"] = str(tmp_dir)
+    target["TEMP"] = str(tmp_dir)
+    target["TMP"] = str(tmp_dir)
+    return target
 
 
 def venv_python(env_dir: Path) -> Path:
@@ -382,11 +492,12 @@ def sanitize_installer_line(line: str) -> str | None:
     return None
 
 
-def run_checked(command: list[str], message: str, cwd: Path | None = None) -> None:
+def run_checked(command: list[str], message: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
     emit("setup", f"{message}. This can take several minutes.")
     process = subprocess.Popen(
         command,
         cwd=str(cwd) if cwd else None,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -508,7 +619,7 @@ def hf_snapshot_progress_class(label: str):
 
 def download_file(url: str, destination: Path, label: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(url, headers={"User-Agent": "ImageToHunyuan3D/26.6.13"})
+    request = urllib.request.Request(url, headers={"User-Agent": "ImageTo3D/26.7.16"})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             total_header = response.headers.get("Content-Length")
@@ -551,9 +662,9 @@ def safe_extract_zip(zip_path: Path, destination: Path) -> Path:
     return destination
 
 
-def ensure_source(paths: dict[str, Path]) -> Path:
-    source_dir = paths["source_dir"]
-    marker = source_dir / SOURCE_MARKER
+def ensure_hunyuan_source(paths: dict[str, Path]) -> Path:
+    source_dir = paths["hunyuan_source_dir"]
+    marker = source_dir / HUNYUAN_SOURCE_MARKER
     if marker.exists():
         return source_dir
 
@@ -561,6 +672,237 @@ def ensure_source(paths: dict[str, Path]) -> Path:
     archive = paths["runtime_dir"] / "Hunyuan3D-2.1-main.zip"
     download_file(HUNYUAN_SOURCE_URL, archive, "Hunyuan3D source")
     safe_extract_zip(archive, source_dir)
+    marker.write_text("ok\n", encoding="utf-8")
+    return source_dir
+
+
+def clone_or_update(repo_url: str, destination: Path, label: str, branch_or_tag: str | None = None, recursive: bool = False) -> None:
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError(f"Git is required to install {label}. Install Git and run setup again.")
+    if destination.is_dir() and (destination / ".git").is_dir():
+        run_checked([git, "-C", str(destination), "fetch", "--depth", "1"], f"Refreshing {label} source")
+        if branch_or_tag:
+            run_checked([git, "-C", str(destination), "checkout", branch_or_tag], f"Selecting {label} revision")
+        return
+    if destination.exists():
+        shutil.rmtree(destination, ignore_errors=True)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    command = [git, "clone", "--depth", "1"]
+    if recursive:
+        command.append("--recursive")
+    if branch_or_tag:
+        command.extend(["--branch", branch_or_tag])
+    command.extend([repo_url, str(destination)])
+    run_checked(command, f"Downloading {label} source")
+
+
+def patch_trellis_dinov3_source(source_dir: Path) -> None:
+    target_files = [
+        source_dir / "trellis2" / "modules" / "image_feature_extractor.py",
+        source_dir / "trellis2" / "trainers" / "flow_matching" / "mixins" / "image_conditioned.py",
+    ]
+    old = "        for i, layer_module in enumerate(self.model.layer):\n"
+    new = (
+        "        # Current Transformers exposes DINOv3 blocks under model.layer.\n"
+        "        transformer_layers = getattr(self.model, \"layer\", None)\n"
+        "        if transformer_layers is None and hasattr(self.model, \"model\"):\n"
+        "            transformer_layers = getattr(self.model.model, \"layer\", None)\n"
+        "        if transformer_layers is None:\n"
+        "            raise AttributeError(\"DINOv3ViTModel exposes neither layer nor model.layer\")\n"
+        "        for i, layer_module in enumerate(transformer_layers):\n"
+    )
+    changed = False
+    for file_path in target_files:
+        if not file_path.is_file():
+            continue
+        try:
+            text = file_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = file_path.read_text(encoding="utf-8-sig")
+        if "transformer_layers = getattr(self.model, \"layer\", None)" in text:
+            continue
+        patched = text.replace(old, new)
+        if patched != text:
+            file_path.write_text(patched, encoding="utf-8", newline="\n")
+            changed = True
+    if changed:
+        emit("setup", "Patched TRELLIS.2 DINOv3 feature extractor for current Transformers")
+
+
+def patch_trellis_attention_source(source_dir: Path) -> None:
+    changed = False
+
+    sparse_config = source_dir / "trellis2" / "modules" / "sparse" / "config.py"
+    if sparse_config.is_file():
+        text = sparse_config.read_text(encoding="utf-8")
+        patched = text.replace(
+            "env_sparse_attn_backend in ['xformers', 'flash_attn', 'flash_attn_3']",
+            "env_sparse_attn_backend in ['xformers', 'flash_attn', 'flash_attn_3', 'sdpa']",
+        ).replace(
+            "def set_attn_backend(backend: Literal['xformers', 'flash_attn']):",
+            "def set_attn_backend(backend: Literal['xformers', 'flash_attn', 'flash_attn_3', 'sdpa']):",
+        )
+        if patched != text:
+            sparse_config.write_text(patched, encoding="utf-8", newline="\n")
+            changed = True
+
+    sparse_full_attn = source_dir / "trellis2" / "modules" / "sparse" / "attention" / "full_attn.py"
+    if sparse_full_attn.is_file():
+        text = sparse_full_attn.read_text(encoding="utf-8")
+        patched = text
+        if "def _sdpa_by_sequence(" not in patched:
+            patched = patched.replace(
+                "__all__ = [\n"
+                "    'sparse_scaled_dot_product_attention',\n"
+                "]\n",
+                "__all__ = [\n"
+                "    'sparse_scaled_dot_product_attention',\n"
+                "]\n"
+                "\n"
+                "\n"
+                "def _sdpa_by_sequence(q, k, v, q_seqlen, kv_seqlen):\n"
+                "    from torch.nn.functional import scaled_dot_product_attention as sdpa\n"
+                "\n"
+                "    outputs = []\n"
+                "    q_start = 0\n"
+                "    kv_start = 0\n"
+                "    for q_len, kv_len in zip(q_seqlen, kv_seqlen):\n"
+                "        q_len = int(q_len)\n"
+                "        kv_len = int(kv_len)\n"
+                "        q_chunk = q[q_start:q_start + q_len].permute(1, 0, 2).unsqueeze(0)\n"
+                "        k_chunk = k[kv_start:kv_start + kv_len].permute(1, 0, 2).unsqueeze(0)\n"
+                "        v_chunk = v[kv_start:kv_start + kv_len].permute(1, 0, 2).unsqueeze(0)\n"
+                "        out = sdpa(q_chunk, k_chunk, v_chunk).squeeze(0).permute(1, 0, 2)\n"
+                "        outputs.append(out)\n"
+                "        q_start += q_len\n"
+                "        kv_start += kv_len\n"
+                "    if outputs:\n"
+                "        return torch.cat(outputs, dim=0)\n"
+                "    return q.new_empty((0, q.shape[1], v.shape[-1]))\n",
+            )
+        if "elif config.ATTN == 'sdpa':\n        if num_all_args == 1:" not in patched:
+            patched = patched.replace(
+                "    elif config.ATTN == 'flash_attn':\n",
+                "    elif config.ATTN == 'sdpa':\n"
+                "        if num_all_args == 1:\n"
+                "            q, k, v = qkv.unbind(dim=1)\n"
+                "        elif num_all_args == 2:\n"
+                "            k, v = kv.unbind(dim=1)\n"
+                "        out = _sdpa_by_sequence(q, k, v, q_seqlen, kv_seqlen)\n"
+                "    elif config.ATTN == 'flash_attn':\n",
+            )
+        if patched != text:
+            sparse_full_attn.write_text(patched, encoding="utf-8", newline="\n")
+            changed = True
+
+    sparse_windowed_attn = source_dir / "trellis2" / "modules" / "sparse" / "attention" / "windowed_attn.py"
+    if sparse_windowed_attn.is_file():
+        text = sparse_windowed_attn.read_text(encoding="utf-8")
+        patched = text
+        if "def _sdpa_windowed(" not in patched:
+            patched = patched.replace(
+                "__all__ = [\n"
+                "    'sparse_windowed_scaled_dot_product_self_attention',\n"
+                "    'sparse_windowed_scaled_dot_product_cross_attention',\n"
+                "]\n",
+                "__all__ = [\n"
+                "    'sparse_windowed_scaled_dot_product_self_attention',\n"
+                "    'sparse_windowed_scaled_dot_product_cross_attention',\n"
+                "]\n"
+                "\n"
+                "\n"
+                "def _sdpa_windowed(q, k, v, q_seq_lens, kv_seq_lens):\n"
+                "    from torch.nn.functional import scaled_dot_product_attention as sdpa\n"
+                "\n"
+                "    outputs = []\n"
+                "    q_start = 0\n"
+                "    kv_start = 0\n"
+                "    for q_len, kv_len in zip(q_seq_lens, kv_seq_lens):\n"
+                "        q_len = int(q_len)\n"
+                "        kv_len = int(kv_len)\n"
+                "        q_chunk = q[q_start:q_start + q_len].permute(1, 0, 2).unsqueeze(0)\n"
+                "        k_chunk = k[kv_start:kv_start + kv_len].permute(1, 0, 2).unsqueeze(0)\n"
+                "        v_chunk = v[kv_start:kv_start + kv_len].permute(1, 0, 2).unsqueeze(0)\n"
+                "        out = sdpa(q_chunk, k_chunk, v_chunk).squeeze(0).permute(1, 0, 2)\n"
+                "        outputs.append(out)\n"
+                "        q_start += q_len\n"
+                "        kv_start += kv_len\n"
+                "    if outputs:\n"
+                "        return torch.cat(outputs, dim=0)\n"
+                "    return q.new_empty((0, q.shape[1], v.shape[-1]))\n",
+            )
+        if "elif config.ATTN == 'sdpa':\n        attn_func_args = {}" not in patched:
+            patched = patched.replace(
+                "    elif config.ATTN == 'flash_attn':\n"
+                "        attn_func_args = {\n"
+                "            'cu_seqlens': torch.cat([torch.tensor([0], device=tensor.device), torch.cumsum(seq_lens, dim=0)], dim=0).int(),\n"
+                "            'max_seqlen': torch.max(seq_lens)\n"
+                "        }\n",
+                "    elif config.ATTN == 'flash_attn':\n"
+                "        attn_func_args = {\n"
+                "            'cu_seqlens': torch.cat([torch.tensor([0], device=tensor.device), torch.cumsum(seq_lens, dim=0)], dim=0).int(),\n"
+                "            'max_seqlen': torch.max(seq_lens)\n"
+                "        }\n"
+                "    elif config.ATTN == 'sdpa':\n"
+                "        attn_func_args = {}\n",
+            )
+        if "elif config.ATTN == 'sdpa':\n        q, k, v = qkv_feats.unbind(dim=1)" not in patched:
+            patched = patched.replace(
+                "    elif config.ATTN == 'flash_attn':\n"
+                "        if 'flash_attn' not in globals():\n"
+                "            import flash_attn\n"
+                "        out = flash_attn.flash_attn_varlen_qkvpacked_func(qkv_feats, **attn_func_args)  # [M, H, C]\n",
+                "    elif config.ATTN == 'flash_attn':\n"
+                "        if 'flash_attn' not in globals():\n"
+                "            import flash_attn\n"
+                "        out = flash_attn.flash_attn_varlen_qkvpacked_func(qkv_feats, **attn_func_args)  # [M, H, C]\n"
+                "    elif config.ATTN == 'sdpa':\n"
+                "        q, k, v = qkv_feats.unbind(dim=1)\n"
+                "        out = _sdpa_windowed(q, k, v, seq_lens, seq_lens)\n",
+                1,
+            )
+        if "elif config.ATTN == 'sdpa':\n        k, v = kv_feats.unbind(dim=1)" not in patched:
+            patched = patched.replace(
+                "    elif config.ATTN == 'flash_attn':\n"
+                "        if 'flash_attn' not in globals():\n"
+                "            import flash_attn\n"
+                "        out = flash_attn.flash_attn_varlen_kvpacked_func(q_feats, kv_feats,\n"
+                "            cu_seqlens_q=q_attn_func_args['cu_seqlens'], cu_seqlens_k=kv_attn_func_args['cu_seqlens'],\n"
+                "            max_seqlen_q=q_attn_func_args['max_seqlen'], max_seqlen_k=kv_attn_func_args['max_seqlen'],\n"
+                "        )  # [M, H, C]\n",
+                "    elif config.ATTN == 'flash_attn':\n"
+                "        if 'flash_attn' not in globals():\n"
+                "            import flash_attn\n"
+                "        out = flash_attn.flash_attn_varlen_kvpacked_func(q_feats, kv_feats,\n"
+                "            cu_seqlens_q=q_attn_func_args['cu_seqlens'], cu_seqlens_k=kv_attn_func_args['cu_seqlens'],\n"
+                "            max_seqlen_q=q_attn_func_args['max_seqlen'], max_seqlen_k=kv_attn_func_args['max_seqlen'],\n"
+                "        )  # [M, H, C]\n"
+                "    elif config.ATTN == 'sdpa':\n"
+                "        k, v = kv_feats.unbind(dim=1)\n"
+                "        out = _sdpa_windowed(q_feats, k, v, q_seq_lens, kv_seq_lens)\n",
+                1,
+            )
+        if patched != text:
+            sparse_windowed_attn.write_text(patched, encoding="utf-8", newline="\n")
+            changed = True
+
+    if changed:
+        emit("setup", "Patched TRELLIS.2 sparse attention to support PyTorch SDPA")
+
+
+def ensure_trellis_source(paths: dict[str, Path]) -> Path:
+    source_dir = paths["trellis_source_dir"]
+    marker = source_dir / TRELLIS_SOURCE_MARKER
+    if marker.exists() and (source_dir / "trellis2").is_dir():
+        patch_trellis_dinov3_source(source_dir)
+        patch_trellis_attention_source(source_dir)
+        return source_dir
+    clone_or_update(TRELLIS_SOURCE_URL, source_dir, TRELLIS_REPO, recursive=True)
+    if not (source_dir / "trellis2").is_dir():
+        raise RuntimeError("TRELLIS.2 source did not contain the trellis2 Python package.")
+    patch_trellis_dinov3_source(source_dir)
+    patch_trellis_attention_source(source_dir)
     marker.write_text("ok\n", encoding="utf-8")
     return source_dir
 
@@ -1208,7 +1550,7 @@ def ensure_pkg_resources(python_path: Path) -> None:
     )
 
 
-def ensure_env(paths: dict[str, Path], source_dir: Path, pytorch_profile: str) -> Path:
+def ensure_env(paths: dict[str, Path], pytorch_profile: str) -> Path:
     env_dir = paths["env_dir"]
     python_path = venv_python(env_dir)
     marker = env_dir / ENV_MARKER
@@ -1230,7 +1572,7 @@ def ensure_env(paths: dict[str, Path], source_dir: Path, pytorch_profile: str) -
         venv.EnvBuilder(with_pip=True).create(env_dir)
 
     if not supported_python_version(python_version(python_path)):
-        raise RuntimeError("Image To Hunyuan 3D requires Python 3.10, 3.11, or 3.12.")
+        raise RuntimeError(f"{APP_NAME} requires Python 3.10, 3.11, or 3.12.")
 
     if marker.exists():
         ensure_pkg_resources(python_path)
@@ -1245,6 +1587,22 @@ def ensure_env(paths: dict[str, Path], source_dir: Path, pytorch_profile: str) -
     )
     run_checked(pip + ["install", "--upgrade", *COMPAT_PACKAGES], "Installing shared runtime packages")
     run_checked(
+        pip + ["install", "--upgrade", HUGGINGFACE_HUB_PIN, "safetensors==0.4.4", "tqdm==4.66.5"],
+        "Installing model download helpers",
+    )
+    run_checked(pip + ["install", "--upgrade", "numpy==1.26.4"], "Pinning compatible NumPy")
+    ensure_pkg_resources(python_path)
+    marker.write_text(f"pytorch={pytorch_profile}\nruntime=base\n", encoding="utf-8")
+    return python_path
+
+
+def ensure_hunyuan_env(python_path: Path, paths: dict[str, Path]) -> None:
+    marker = paths["env_dir"] / HUNYUAN_ENV_MARKER
+    if marker.exists():
+        marker.write_text("ok\n", encoding="utf-8")
+        return
+    pip = [str(python_path), "-m", "pip"]
+    run_checked(
         pip + ["install", "--upgrade", *HUNYUAN_RUNTIME_PACKAGES],
         "Installing Hunyuan inference dependencies",
     )
@@ -1252,27 +1610,293 @@ def ensure_env(paths: dict[str, Path], source_dir: Path, pytorch_profile: str) -
     run_checked(pip + ["install", "--upgrade", "numpy==1.26.4"], "Pinning compatible NumPy")
     install_texture_wheels(python_path, paths)
     ensure_pkg_resources(python_path)
-    marker.write_text(f"pytorch={pytorch_profile}\n", encoding="utf-8")
-    return python_path
+    marker.write_text("ok\n", encoding="utf-8")
 
 
-def prepare_managed_environment(app_data_dir: Path, pytorch_profile: str) -> tuple[Path, dict[str, Path]]:
+def case_insensitive_env_get(env: dict[str, str], key: str) -> str:
+    if key.lower() == "path":
+        values: list[str] = []
+        if key in env:
+            values.append(env[key])
+        for env_key, value in env.items():
+            if env_key.lower() == "path" and env_key != key:
+                values.append(value)
+        if values:
+            seen: set[str] = set()
+            parts: list[str] = []
+            for value in values:
+                for part in value.split(os.pathsep):
+                    normalized = part.strip()
+                    if not normalized:
+                        continue
+                    dedupe_key = normalized.lower() if platform.system() == "Windows" else normalized
+                    if dedupe_key not in seen:
+                        seen.add(dedupe_key)
+                        parts.append(normalized)
+            return os.pathsep.join(parts)
+    if key in env:
+        return env[key]
+    for env_key, value in env.items():
+        if env_key.lower() == key.lower():
+            return value
+    return ""
+
+
+def find_vswhere() -> Path | None:
+    for base in (
+        os.environ.get("ProgramFiles(x86)"),
+        os.environ.get("ProgramFiles"),
+    ):
+        if not base:
+            continue
+        candidate = Path(base) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def candidate_vcvars64_paths() -> list[Path]:
+    candidates: list[Path] = []
+    vswhere = find_vswhere()
+    if vswhere:
+        try:
+            result = subprocess.run(
+                [
+                    str(vswhere),
+                    "-latest",
+                    "-products",
+                    "*",
+                    "-requires",
+                    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                    "-property",
+                    "installationPath",
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            for line in result.stdout.splitlines():
+                install_path = Path(line.strip())
+                if install_path:
+                    candidates.append(install_path / "VC" / "Auxiliary" / "Build" / "vcvars64.bat")
+        except Exception:
+            pass
+    for base in (
+        os.environ.get("ProgramFiles(x86)"),
+        os.environ.get("ProgramFiles"),
+    ):
+        if not base:
+            continue
+        visual_studio = Path(base) / "Microsoft Visual Studio"
+        candidates.extend(visual_studio.glob("20*/*/VC/Auxiliary/Build/vcvars64.bat"))
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.resolve() if candidate.exists() else candidate
+        if resolved not in seen and candidate.is_file():
+            seen.add(resolved)
+            unique.append(candidate)
+    return unique
+
+
+def windows_msvc_build_env() -> dict[str, str]:
+    global MSVC_ENV_CACHE
+    if platform.system() != "Windows":
+        return {}
+    if MSVC_ENV_CACHE is not None:
+        return MSVC_ENV_CACHE
+    for vcvars in candidate_vcvars64_paths():
+        try:
+            with TemporaryDirectory() as temp_dir:
+                dump_env = Path(temp_dir) / "dump_vs_env.bat"
+                dump_env.write_text(
+                    f'@echo off\r\ncall "{vcvars}" >nul\r\nset\r\n',
+                    encoding="utf-8",
+                )
+                result = subprocess.run(
+                    ["cmd.exe", "/d", "/c", str(dump_env)],
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                if result.returncode != 0:
+                    continue
+                env: dict[str, str] = {}
+                for line in result.stdout.splitlines():
+                    if "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    env[key] = value
+            compiler_path = shutil.which("cl.exe", path=case_insensitive_env_get(env, "Path"))
+            if compiler_path:
+                emit("setup", f"Using MSVC compiler: {compiler_path}")
+                MSVC_ENV_CACHE = env
+                return env
+        except Exception as error:
+            emit("setup", f"MSVC environment discovery skipped: {error}")
+    emit("setup", "MSVC compiler environment was not found; TRELLIS.2 native extensions may fail.")
+    MSVC_ENV_CACHE = {}
+    return MSVC_ENV_CACHE
+
+
+def venv_subprocess_env(python_path: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(windows_msvc_build_env())
+    env_dir = python_path.parent.parent
+    env["VIRTUAL_ENV"] = str(env_dir)
+    path_key = "Path" if platform.system() == "Windows" else "PATH"
+    env[path_key] = str(python_path.parent) + os.pathsep + case_insensitive_env_get(env, path_key)
+    if platform.system() == "Windows":
+        env["PATH"] = env[path_key]
+        env["DISTUTILS_USE_SDK"] = "1"
+        env["MSSdk"] = "1"
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8:replace"
+    return env
+
+
+def patch_flex_gemm_source(source_dir: Path) -> None:
+    sparse_neighbor_map = source_dir / "flex_gemm" / "kernels" / "cuda" / "spconv" / "sparse_neighbor_map.cu"
+    changed = False
+    if sparse_neighbor_map.is_file():
+        try:
+            text = sparse_neighbor_map.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = sparse_neighbor_map.read_text(encoding="utf-8-sig")
+        patched = text.replace(
+            "expanded_keys.data_ptr<T>()",
+            "expanded_keys.template data_ptr<T>()",
+        ).replace(
+            "valid_keys.data_ptr<T>()",
+            "valid_keys.template data_ptr<T>()",
+        )
+        if patched != text:
+            sparse_neighbor_map.write_text(patched, encoding="utf-8", newline="\n")
+            changed = True
+
+    setup_py = source_dir / "setup.py"
+    if setup_py.is_file():
+        text = setup_py.read_text(encoding="utf-8")
+        patched = text.replace(
+            'os.makedirs(os.path.expanduser("~/.flex_gemm"), exist_ok=True)',
+            'flex_gemm_cache_dir = os.environ.get("FLEX_GEMM_CACHE_DIR", os.path.expanduser("~/.flex_gemm"))\nos.makedirs(flex_gemm_cache_dir, exist_ok=True)',
+        ).replace(
+            'dst_cache_path = os.path.expanduser("~/.flex_gemm/autotune_cache.json")',
+            'dst_cache_path = os.path.join(flex_gemm_cache_dir, "autotune_cache.json")',
+        )
+        if patched != text:
+            setup_py.write_text(patched, encoding="utf-8", newline="\n")
+            changed = True
+
+    if changed:
+        emit("setup", "Patched FlexGEMM source for the Windows TRELLIS.2 build")
+
+
+def patch_o_voxel_source(source_dir: Path) -> None:
+    replacements = {
+        source_dir / "src" / "convert" / "flexible_dual_grid.cpp": [
+            ("1e-6d", "1e-6"),
+            ("0.0d", "0.0"),
+            ("{int(voxels .size()), 3}", "{static_cast<int64_t>(voxels.size()), 3}"),
+            ("{int(dual_vertices.size()), 3}", "{static_cast<int64_t>(dual_vertices.size()), 3}"),
+            ("{int(intersected.size()), 3}", "{static_cast<int64_t>(intersected.size()), 3}"),
+        ],
+        source_dir / "src" / "io" / "filter_neighbor.cpp": [
+            ("torch::zeros({N, C}", "torch::zeros({static_cast<int64_t>(N), static_cast<int64_t>(C)}"),
+        ],
+        source_dir / "src" / "io" / "filter_parent.cpp": [
+            ("torch::zeros({N_leaf, C}", "torch::zeros({static_cast<int64_t>(N_leaf), static_cast<int64_t>(C)}"),
+        ],
+        source_dir / "src" / "io" / "svo.cpp": [
+            ("{svo.size()}", "{static_cast<int64_t>(svo.size())}"),
+            ("{codes.size()}", "{static_cast<int64_t>(codes.size())}"),
+        ],
+    }
+    changed = False
+    for file_path, file_replacements in replacements.items():
+        if not file_path.is_file():
+            continue
+        try:
+            text = file_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = file_path.read_text(encoding="utf-8-sig")
+        patched = text
+        for old, new in file_replacements:
+            patched = patched.replace(old, new)
+        if patched != text:
+            file_path.write_text(patched, encoding="utf-8", newline="\n")
+            changed = True
+    if changed:
+        emit("setup", "Patched O-Voxel C++ source for the Windows TRELLIS.2 build")
+
+
+def ensure_trellis_extension(python_path: Path, paths: dict[str, Path], name: str, repo_url: str, branch_or_tag: str | None) -> None:
+    destination = paths["trellis_extensions_dir"] / name
+    clone_or_update(repo_url, destination, name, branch_or_tag=branch_or_tag, recursive=True)
+    if name == "FlexGEMM":
+        patch_flex_gemm_source(destination)
+    run_checked(
+        [str(python_path), "-m", "pip", "install", str(destination), "--no-build-isolation"],
+        f"Installing TRELLIS.2 extension {name}",
+        env=venv_subprocess_env(python_path),
+    )
+
+
+def ensure_trellis_env(python_path: Path, paths: dict[str, Path]) -> None:
+    marker = paths["env_dir"] / TRELLIS_ENV_MARKER
+    if marker.exists():
+        return
+    ensure_trellis_source(paths)
+    pip = [str(python_path), "-m", "pip"]
+    run_checked(pip + ["install", "--upgrade", *TRELLIS_BASIC_PACKAGES], "Installing TRELLIS.2 Python dependencies")
+    run_checked(pip + ["install", "--upgrade", TRELLIS_UTILS3D_PACKAGE], "Installing TRELLIS.2 geometry helpers")
+    for name, (repo_url, branch_or_tag) in TRELLIS_EXTENSION_REPOS.items():
+        ensure_trellis_extension(python_path, paths, name, repo_url, branch_or_tag)
+    o_voxel_dir = paths["trellis_source_dir"] / "o-voxel"
+    if not o_voxel_dir.is_dir():
+        raise RuntimeError("TRELLIS.2 o-voxel submodule is missing. Run setup again with Git available.")
+    patch_o_voxel_source(o_voxel_dir)
+    run_checked(
+        [str(python_path), "-m", "pip", "install", str(o_voxel_dir), "--no-build-isolation", "--no-deps"],
+        "Installing TRELLIS.2 O-Voxel extension",
+        env=venv_subprocess_env(python_path),
+    )
+    marker.write_text("ok\n", encoding="utf-8")
+
+
+def prepare_managed_environment(app_data_dir: Path, pytorch_profile: str, model_backend: str) -> tuple[Path, dict[str, Path]]:
     paths = app_paths(app_data_dir, pytorch_profile)
-    for key in ("runtime_dir", "model_dir", "output_dir", "jobs_dir"):
+    for key in ("runtime_dir", "model_dir", "output_dir", "jobs_dir", "trellis_extensions_dir", "cache_dir", "tmp_dir"):
         paths[key].mkdir(parents=True, exist_ok=True)
-    source_dir = ensure_source(paths)
-    patch_hunyuan_source(source_dir)
-    python_path = ensure_env(paths, source_dir, pytorch_profile)
+    configure_portable_cache_env(paths)
+    python_path = ensure_env(paths, pytorch_profile)
+    if model_backend == "trellis2":
+        ensure_trellis_source(paths)
+        ensure_trellis_env(python_path, paths)
+    else:
+        source_dir = ensure_hunyuan_source(paths)
+        patch_hunyuan_source(source_dir)
+        ensure_hunyuan_env(python_path, paths)
     return python_path, paths
 
 
 def managed_env_vars(app_data_dir: Path, paths: dict[str, Path]) -> dict[str, str]:
     env = os.environ.copy()
+    configure_portable_cache_env(paths, env)
+    env["I3D_IN_MANAGED_ENV"] = "1"
+    env["I3D_HUNYUAN_SOURCE_DIR"] = str(paths["hunyuan_source_dir"])
+    env["I3D_TRELLIS_SOURCE_DIR"] = str(paths["trellis_source_dir"])
+    env["I3D_APP_DATA_DIR"] = str(app_data_dir)
     env["IH3D_IN_MANAGED_ENV"] = "1"
-    env["IH3D_SOURCE_DIR"] = str(paths["source_dir"])
-    env["HF_HOME"] = str(paths["model_dir"] / "huggingface")
-    env["HF_HUB_CACHE"] = str(paths["model_dir"] / "huggingface" / "hub")
-    env["TRANSFORMERS_CACHE"] = str(paths["model_dir"] / "huggingface" / "transformers")
+    env["IH3D_SOURCE_DIR"] = str(paths["hunyuan_source_dir"])
+    env.setdefault("ATTN_BACKEND", "sdpa")
+    env.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8:replace"
     env["PYTHONLEGACYWINDOWSSTDIO"] = "0"
@@ -1308,10 +1932,10 @@ def ensure_realesrgan(paths: dict[str, Path]) -> Path:
     return ckpt
 
 
-def ensure_models(paths: dict[str, Path], include_texture: bool = True) -> None:
+def ensure_hunyuan_models(paths: dict[str, Path], include_texture: bool = True) -> None:
     paths["model_dir"].mkdir(parents=True, exist_ok=True)
-    marker = paths["model_dir"] / MODEL_MARKER
-    realesrgan = paths["source_dir"] / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth"
+    marker = paths["model_dir"] / HUNYUAN_MODEL_MARKER
+    realesrgan = paths["hunyuan_source_dir"] / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth"
     if marker.exists() and (not include_texture or realesrgan.is_file()):
         return
     ensure_realesrgan(paths)
@@ -1340,6 +1964,59 @@ def ensure_models(paths: dict[str, Path], include_texture: bool = True) -> None:
             local_files_only=False,
             tqdm_class=hf_snapshot_progress_class("DINOv2 model files"),
         )
+    marker.write_text("ok\n", encoding="utf-8")
+
+
+def ensure_trellis_models(paths: dict[str, Path]) -> None:
+    paths["model_dir"].mkdir(parents=True, exist_ok=True)
+    marker = paths["model_dir"] / TRELLIS_MODEL_MARKER
+    if marker.exists():
+        return
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.utils import disable_progress_bars
+
+    disable_progress_bars()
+    emit("model", "Downloading TRELLIS.2 4B model bundle")
+    snapshot_download(
+        repo_id=TRELLIS_MODEL_REPO,
+        local_files_only=False,
+        tqdm_class=hf_snapshot_progress_class("TRELLIS.2 model files"),
+    )
+    emit("model", "Checking TRELLIS.2 DINOv3 image conditioning model")
+    try:
+        snapshot_download(
+            repo_id=TRELLIS_DINOV3_REPO,
+            local_files_only=False,
+            tqdm_class=hf_snapshot_progress_class("DINOv3 model files"),
+        )
+    except Exception as error:
+        message = str(error)
+        if "gated repo" in message.lower() or "403" in message:
+            raise RuntimeError(
+                "TRELLIS.2 requires access to the gated Hugging Face model "
+                f"{TRELLIS_DINOV3_REPO}. The current Hugging Face token is not authorized. "
+                f"Request access at https://huggingface.co/{TRELLIS_DINOV3_REPO}, then run Prepare again "
+                "with an authorized HF_TOKEN or HUGGING_FACE_HUB_TOKEN."
+            ) from error
+        raise
+    emit("model", "Checking TRELLIS.2 background removal model")
+    try:
+        snapshot_download(
+            repo_id=TRELLIS_REMBG_REPO,
+            local_files_only=False,
+            tqdm_class=hf_snapshot_progress_class("RMBG model files"),
+        )
+    except Exception as error:
+        message = str(error)
+        if "gated repo" in message.lower() or "403" in message:
+            raise RuntimeError(
+                "TRELLIS.2 requires access to the gated Hugging Face model "
+                f"{TRELLIS_REMBG_REPO}. The current Hugging Face token is not authorized. "
+                f"Request access at https://huggingface.co/{TRELLIS_REMBG_REPO}, then run Prepare again "
+                "with an authorized HF_TOKEN or HUGGING_FACE_HUB_TOKEN."
+            ) from error
+        raise
     marker.write_text("ok\n", encoding="utf-8")
 
 
@@ -1497,6 +2174,45 @@ def configure_torch_performance(torch: Any) -> None:
         emit("setup", f"Torch performance tuning skipped: {error}")
 
 
+def release_cuda_memory(torch: Any | None = None, message: str | None = None) -> None:
+    gc.collect()
+    try:
+        if torch is None:
+            import torch as torch_module
+
+            torch = torch_module
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if message:
+        emit("setup", message)
+
+
+def release_cached_pipelines(names: tuple[str, ...], torch: Any | None = None, reason: str | None = None) -> None:
+    released = False
+    if "shape" in names:
+        released = released or PIPELINE_CACHE.get("shape_pipeline") is not None
+        PIPELINE_CACHE["shape_pipeline"] = None
+        PIPELINE_CACHE["shape_key"] = None
+    if "paint" in names:
+        released = released or PIPELINE_CACHE.get("paint_pipeline") is not None
+        PIPELINE_CACHE["paint_pipeline"] = None
+        PIPELINE_CACHE["paint_key"] = None
+    if "trellis" in names:
+        released = released or PIPELINE_CACHE.get("trellis_pipeline") is not None
+        PIPELINE_CACHE["trellis_pipeline"] = None
+        PIPELINE_CACHE["trellis_key"] = None
+    if "background" in names:
+        released = released or PIPELINE_CACHE.get("background_remover") is not None
+        PIPELINE_CACHE["background_remover"] = None
+    release_cuda_memory(torch, reason if released else None)
+
+
 def load_condition_image(path: Path, rembg: Any | None = None):
     from PIL import Image
 
@@ -1542,6 +2258,8 @@ PIPELINE_CACHE: dict[str, Any] = {
     "shape_pipeline": None,
     "paint_key": None,
     "paint_pipeline": None,
+    "trellis_key": None,
+    "trellis_pipeline": None,
     "background_remover": None,
     "torch_configured": False,
 }
@@ -1596,7 +2314,185 @@ def voxelize_mesh(mesh: Any, resolution: int) -> tuple[Any, dict[str, Any] | Non
     return voxel_mesh, sidecar, voxel_count
 
 
-def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
+def _face_count_from_trimesh(mesh_path: Path) -> int | None:
+    try:
+        import trimesh
+
+        loaded = trimesh.load(str(mesh_path), force="mesh")
+        faces = getattr(loaded, "faces", None)
+        if faces is not None:
+            return int(len(faces))
+        geometry = getattr(loaded, "geometry", None)
+        if geometry:
+            return int(sum(len(getattr(mesh, "faces", [])) for mesh in geometry.values()))
+    except Exception:
+        return None
+    return None
+
+
+def _simplify_mesh_with_pymeshlab(mesh_path: Path, target_faces: int) -> tuple[int | None, int | None]:
+    import pymeshlab
+
+    mesh_set = pymeshlab.MeshSet()
+    mesh_set.load_new_mesh(str(mesh_path))
+    before = int(mesh_set.current_mesh().face_number())
+    if before <= target_faces:
+        return before, before
+
+    mesh_set.apply_filter(
+        "meshing_decimation_quadric_edge_collapse",
+        targetfacenum=int(target_faces),
+        preservenormal=True,
+        preserveboundary=True,
+        preservetopology=False,
+        optimalplacement=True,
+        qualitythr=1.0,
+    )
+    after = int(mesh_set.current_mesh().face_number())
+    with TemporaryDirectory() as temp_dir:
+        simplified_obj = Path(temp_dir) / "simplified.obj"
+        mesh_set.save_current_mesh(str(simplified_obj), save_textures=False)
+        import trimesh
+
+        simplified_mesh = trimesh.load(str(simplified_obj), force="mesh")
+        simplified_mesh.export(str(mesh_path))
+    return before, after
+
+
+def _simplify_mesh_with_trimesh(mesh_path: Path, target_faces: int) -> tuple[int | None, int | None]:
+    import trimesh
+
+    loaded = trimesh.load(str(mesh_path), force="mesh")
+    faces = getattr(loaded, "faces", None)
+    before = int(len(faces)) if faces is not None else None
+    if before is not None and before <= target_faces:
+        return before, before
+
+    simplified = None
+    for method_name in ("simplify_quadric_decimation", "simplify_quadratic_decimation"):
+        method = getattr(loaded, method_name, None)
+        if method is None:
+            continue
+        try:
+            simplified = method(face_count=int(target_faces))
+        except TypeError:
+            simplified = method(int(target_faces))
+        break
+    if simplified is None:
+        raise RuntimeError("trimesh simplification support is not available")
+
+    simplified_path = mesh_path.with_name(f"{mesh_path.stem}.simplified{mesh_path.suffix}")
+    simplified.export(str(simplified_path))
+    simplified_path.replace(mesh_path)
+    simplified_faces = getattr(simplified, "faces", None)
+    after = int(len(simplified_faces)) if simplified_faces is not None else _face_count_from_trimesh(mesh_path)
+    return before, after
+
+
+def simplify_mesh_file(mesh_path: Path, target_faces: int) -> tuple[int | None, int | None]:
+    errors: list[str] = []
+    for label, simplifier in (
+        ("PyMeshLab", _simplify_mesh_with_pymeshlab),
+        ("trimesh", _simplify_mesh_with_trimesh),
+    ):
+        try:
+            return simplifier(mesh_path, target_faces)
+        except Exception as error:
+            errors.append(f"{label}: {error}")
+    raise RuntimeError("; ".join(errors))
+
+
+def reduce_exported_mesh_faces(mesh_path: Path, target_faces: int, image_path: Path) -> None:
+    if not mesh_path.is_file():
+        return
+    before_hint = _face_count_from_trimesh(mesh_path)
+    if before_hint is not None and before_hint <= target_faces:
+        emit(
+            "setup",
+            f"Mesh already fits the {target_faces:,} face target ({before_hint:,} faces).",
+            path=str(image_path),
+        )
+        return
+    try:
+        before, after = simplify_mesh_file(mesh_path, target_faces)
+    except Exception as error:
+        emit(
+            "setup",
+            f"Mesh face reduction skipped: {error}",
+            path=str(image_path),
+        )
+        return
+
+    if before is None:
+        before = before_hint
+    if after is None:
+        after = _face_count_from_trimesh(mesh_path)
+    if before is not None and after is not None:
+        emit(
+            "setup",
+            f"Reduced mesh faces from {before:,} to {after:,} (target {target_faces:,}).",
+            path=str(image_path),
+        )
+    elif after is not None:
+        emit("setup", f"Reduced mesh to {after:,} faces (target {target_faces:,}).", path=str(image_path))
+
+
+def patch_transformers_weight_constants_for_diffusers() -> None:
+    try:
+        import transformers.utils as transformers_utils
+    except Exception as error:
+        emit("setup", f"Transformers compatibility shim skipped: {error}")
+        return
+
+    constants = {
+        "WEIGHTS_NAME": "pytorch_model.bin",
+        "SAFE_WEIGHTS_NAME": "model.safetensors",
+        "TF2_WEIGHTS_NAME": "tf_model.h5",
+        "TF_WEIGHTS_NAME": "model.ckpt",
+        "FLAX_WEIGHTS_NAME": "flax_model.msgpack",
+        "ONNX_WEIGHTS_NAME": "model.onnx",
+        "ONNX_EXTERNAL_WEIGHTS_NAME": "weights.pb",
+    }
+    missing = []
+    for name, value in constants.items():
+        if not hasattr(transformers_utils, name):
+            setattr(transformers_utils, name, value)
+            missing.append(name)
+    if missing:
+        emit("setup", f"Patched Transformers 5 constants for diffusers: {', '.join(missing)}")
+
+
+def get_hunyuan_paint_pipeline(
+    source_dir: Path,
+    options: dict[str, Any],
+    Hunyuan3DPaintConfig: Any,
+    Hunyuan3DPaintPipeline: Any,
+) -> Any:
+    key = paint_cache_key(options)
+    paint_pipeline = PIPELINE_CACHE.get("paint_pipeline") if PIPELINE_CACHE.get("paint_key") == key else None
+    if paint_pipeline is None:
+        model_started = time.perf_counter()
+        emit("model", "Loading Hunyuan3D PBR texture model on CUDA")
+        max_num_view = texture_view_count(options)
+        resolution = as_int(options.get("textureViewSize"), 512, 256, 2048)
+        config = Hunyuan3DPaintConfig(max_num_view, resolution)
+        config.realesrgan_ckpt_path = str(source_dir / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth")
+        config.multiview_cfg_path = str(source_dir / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml")
+        config.custom_pipeline = str(source_dir / "hy3dpaint" / "hunyuanpaintpbr")
+        if hasattr(config, "texture_size"):
+            config.texture_size = as_int(options.get("textureSize"), getattr(config, "texture_size"), 512, 8192)
+        apply_texture_options(config, options)
+        paint_pipeline = Hunyuan3DPaintPipeline(config)
+        PIPELINE_CACHE["paint_pipeline"] = paint_pipeline
+        PIPELINE_CACHE["paint_key"] = key
+        emit_timing("Texture model load", model_started)
+    else:
+        apply_texture_options(paint_pipeline.config, options)
+        emit("model", "Reusing loaded Hunyuan3D PBR texture model")
+    return paint_pipeline
+
+
+def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     source_dir = paths["source_dir"]
     launch_cwd = Path.cwd()
     sys.path.insert(0, str(source_dir))
@@ -1611,6 +2507,8 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     except Exception as error:
         emit("setup", f"torchvision compatibility fix skipped: {error}")
 
+    patch_transformers_weight_constants_for_diffusers()
+
     import torch
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
     from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
@@ -1618,6 +2516,7 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     if not PIPELINE_CACHE.get("torch_configured"):
         configure_torch_performance(torch)
         PIPELINE_CACHE["torch_configured"] = True
+    release_cached_pipelines(("trellis",), torch, "Released TRELLIS.2 model before Hunyuan3D generation")
 
     options = job.get("options", {})
     mode = str(options.get("mode", "meshTexture"))
@@ -1675,28 +2574,13 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                 maybe_compile_shape_pipeline(shape_pipeline, torch)
 
         paint_pipeline = None
-        if mode != "meshOnly":
-            key = paint_cache_key(options)
-            paint_pipeline = PIPELINE_CACHE.get("paint_pipeline") if PIPELINE_CACHE.get("paint_key") == key else None
-            if paint_pipeline is None:
-                model_started = time.perf_counter()
-                emit("model", "Loading Hunyuan3D PBR texture model on CUDA")
-                max_num_view = texture_view_count(options)
-                resolution = as_int(options.get("textureViewSize"), 512, 256, 2048)
-                config = Hunyuan3DPaintConfig(max_num_view, resolution)
-                config.realesrgan_ckpt_path = str(source_dir / "hy3dpaint" / "ckpt" / "RealESRGAN_x4plus.pth")
-                config.multiview_cfg_path = str(source_dir / "hy3dpaint" / "cfgs" / "hunyuan-paint-pbr.yaml")
-                config.custom_pipeline = str(source_dir / "hy3dpaint" / "hunyuanpaintpbr")
-                if hasattr(config, "texture_size"):
-                    config.texture_size = as_int(options.get("textureSize"), getattr(config, "texture_size"), 512, 8192)
-                apply_texture_options(config, options)
-                paint_pipeline = Hunyuan3DPaintPipeline(config)
-                PIPELINE_CACHE["paint_pipeline"] = paint_pipeline
-                PIPELINE_CACHE["paint_key"] = key
-                emit_timing("Texture model load", model_started)
-            else:
-                apply_texture_options(paint_pipeline.config, options)
-                emit("model", "Reusing loaded Hunyuan3D PBR texture model")
+        if mode == "textureOnly":
+            paint_pipeline = get_hunyuan_paint_pipeline(
+                source_dir,
+                options,
+                Hunyuan3DPaintConfig,
+                Hunyuan3DPaintPipeline,
+            )
 
         background_remover = PIPELINE_CACHE.get("background_remover")
         for index, image_path in enumerate(input_paths):
@@ -1734,6 +2618,7 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                     )
                     emit_timing("Mesh generation", stage_started, path=str(image_path))
                     mesh = meshes[0]
+                    del meshes
                     if as_bool(options.get("voxelize"), False):
                         voxel_started = time.perf_counter()
                         emit("stage_start", f"Voxelizing mesh for {image_path.name}", path=str(image_path))
@@ -1750,14 +2635,40 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                         emit_timing("Mesh voxelize", voxel_started, path=str(image_path))
                     export_started = time.perf_counter()
                     mesh.export(intermediate_mesh)
+                    del mesh
+                    generator = None
+                    image = None
                     emit_timing("Mesh export", export_started, path=str(image_path))
+                    if as_bool(options.get("reduceFaces"), True) and not as_bool(options.get("voxelize"), False):
+                        simplify_started = time.perf_counter()
+                        target_faces = as_int(options.get("maxFaces"), 5_000, 1_000, 5_000_000)
+                        emit(
+                            "stage_start",
+                            f"Reducing mesh to {target_faces:,} faces for {image_path.name}",
+                            path=str(image_path),
+                        )
+                        reduce_exported_mesh_faces(intermediate_mesh, target_faces, image_path)
+                        emit_timing("Mesh simplification", simplify_started, path=str(image_path))
                     emit("stage_done", f"Mesh generated for {image_path.name}", path=str(image_path))
 
                 if mode == "meshOnly":
                     shutil.move(str(intermediate_mesh), str(final_mesh_path))
                     outputs.append(str(final_mesh_path.resolve()))
                 else:
-                    assert paint_pipeline is not None
+                    if mode == "meshTexture":
+                        shape_pipeline = None
+                        release_cached_pipelines(
+                            ("shape",),
+                            torch,
+                            "Released Hunyuan3D shape model before PBR texturing",
+                        )
+                    if paint_pipeline is None:
+                        paint_pipeline = get_hunyuan_paint_pipeline(
+                            source_dir,
+                            options,
+                            Hunyuan3DPaintConfig,
+                            Hunyuan3DPaintPipeline,
+                        )
                     mesh_source = (
                         Path(str(options.get("meshInputPath", "")).strip())
                         if mode == "textureOnly"
@@ -1817,28 +2728,215 @@ def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
         else:
             emit("done", f"Batch finished in {batch_elapsed}.", failedCount=0, totalCount=total)
     finally:
+        if not as_bool(options.get("keepModelsWarm"), True):
+            release_cached_pipelines(
+                ("shape", "paint", "background"),
+                torch,
+                "Released Hunyuan3D models after batch",
+            )
         shutil.rmtree(run_dir, ignore_errors=True)
         os.chdir(launch_cwd)
+
+
+def trellis_pipeline_type(options: dict[str, Any]) -> str:
+    resolution = as_int(options.get("trellisResolution"), 1024, 512, 1536)
+    if resolution <= 512:
+        return "512"
+    if resolution >= 1536:
+        return "1536_cascade"
+    return "1024_cascade"
+
+
+def trellis_sampler_params(options: dict[str, Any], prefix: str, defaults: tuple[int, float, float, float]) -> dict[str, Any]:
+    default_steps, default_guidance, default_rescale, default_rescale_t = defaults
+    return {
+        "steps": as_int(options.get(f"{prefix}Steps"), default_steps, 1, 100),
+        "guidance_strength": as_float(options.get(f"{prefix}Guidance"), default_guidance, 0, 30),
+        "guidance_rescale": as_float(options.get(f"{prefix}Rescale"), default_rescale, 0, 2),
+        "rescale_t": as_float(options.get(f"{prefix}RescaleT"), default_rescale_t, 0, 10),
+    }
+
+
+def trellis_export_glb(mesh: Any, target: Path, options: dict[str, Any]) -> None:
+    import o_voxel
+
+    if hasattr(mesh, "simplify"):
+        mesh.simplify(16_777_216)
+    glb = o_voxel.postprocess.to_glb(
+        vertices=mesh.vertices,
+        faces=mesh.faces,
+        attr_volume=mesh.attrs,
+        coords=mesh.coords,
+        attr_layout=mesh.layout,
+        voxel_size=mesh.voxel_size,
+        aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+        decimation_target=as_int(options.get("trellisDecimationTarget"), 5_000, 1_000, 5_000_000),
+        texture_size=as_int(options.get("trellisTextureSize"), 1024, 512, 8192),
+        remesh=as_bool(options.get("trellisRemesh"), True),
+        remesh_band=1,
+        remesh_project=0,
+        verbose=True,
+    )
+    glb.export(str(target), extension_webp=as_bool(options.get("trellisExportWebp"), True))
+
+
+def run_trellis_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
+    source_dir = paths["trellis_source_dir"]
+    launch_cwd = Path.cwd()
+    patch_trellis_dinov3_source(source_dir)
+    patch_trellis_attention_source(source_dir)
+    sys.path.insert(0, str(source_dir))
+    os.chdir(source_dir)
+    os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault("ATTN_BACKEND", "sdpa")
+    os.environ.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
+
+    import torch
+    from PIL import Image
+    from trellis2.pipelines import Trellis2ImageTo3DPipeline
+
+    if not PIPELINE_CACHE.get("torch_configured"):
+        configure_torch_performance(torch)
+        PIPELINE_CACHE["torch_configured"] = True
+    release_cached_pipelines(
+        ("shape", "paint", "background"),
+        torch,
+        "Released Hunyuan3D models before TRELLIS.2 generation",
+    )
+
+    options = job.get("options", {})
+    overwrite = as_bool(options.get("overwrite"), False)
+    requested_output = Path(str(options.get("outputDir", "")).strip() or paths["output_dir"])
+    if not requested_output.is_absolute():
+        requested_output = (launch_cwd / requested_output).resolve()
+    requested_output.mkdir(parents=True, exist_ok=True)
+    cleanup_job_scratch(paths["jobs_dir"])
+    run_dir = paths["jobs_dir"] / job.get("job_id", f"job-{int(time.time())}")
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    input_paths = [Path(path) for path in job.get("paths", [])]
+    total = len(input_paths)
+    failed_count = 0
+    batch_started = time.perf_counter()
+
+    try:
+        key = (TRELLIS_MODEL_REPO, as_bool(options.get("forceOffload"), False))
+        pipeline = PIPELINE_CACHE.get("trellis_pipeline") if PIPELINE_CACHE.get("trellis_key") == key else None
+        if pipeline is None:
+            model_started = time.perf_counter()
+            emit("model", "Loading TRELLIS.2 model on CUDA")
+            pipeline = Trellis2ImageTo3DPipeline.from_pretrained(TRELLIS_MODEL_REPO)
+            if as_bool(options.get("forceOffload"), False):
+                pipeline.low_vram = True
+            pipeline.cuda()
+            PIPELINE_CACHE["trellis_pipeline"] = pipeline
+            PIPELINE_CACHE["trellis_key"] = key
+            emit_timing("TRELLIS.2 model load", model_started)
+        else:
+            emit("model", "Reusing loaded TRELLIS.2 model")
+
+        for index, image_path in enumerate(input_paths):
+            image_started = time.perf_counter()
+            emit("image_start", f"Processing {image_path.name}", path=str(image_path))
+            try:
+                if not image_path.is_file():
+                    raise RuntimeError(f"Input image was not found: {image_path}")
+                base = output_base_name(options, image_path, index, total)
+                final_mesh_path = unique_target(requested_output / f"{base}.glb", overwrite)
+                image = Image.open(image_path)
+                seed = seed_value(options, "trellisSeed", "trellisSeedMode")
+                stage_started = time.perf_counter()
+                emit("stage_start", f"Generating TRELLIS.2 asset for {image_path.name}", path=str(image_path))
+                meshes = pipeline.run(
+                    image,
+                    seed=seed,
+                    pipeline_type=trellis_pipeline_type(options),
+                    sparse_structure_sampler_params=trellis_sampler_params(
+                        options,
+                        "trellisSparse",
+                        (12, 7.5, 0.7, 5.0),
+                    ),
+                    shape_slat_sampler_params=trellis_sampler_params(
+                        options,
+                        "trellisShape",
+                        (12, 7.5, 0.5, 3.0),
+                    ),
+                    tex_slat_sampler_params=trellis_sampler_params(
+                        options,
+                        "trellisTexture",
+                        (12, 3.0, 0.5, 3.0),
+                    ),
+                )
+                emit_timing("TRELLIS.2 generation", stage_started, path=str(image_path))
+                export_started = time.perf_counter()
+                emit("stage_start", f"Exporting TRELLIS.2 GLB for {image_path.name}", path=str(image_path))
+                trellis_export_glb(meshes[0], final_mesh_path, options)
+                emit_timing("TRELLIS.2 GLB export", export_started, path=str(image_path))
+                elapsed_seconds = time.perf_counter() - image_started
+                emit(
+                    "image_done",
+                    f"Saved output in {format_elapsed(elapsed_seconds)}",
+                    path=str(image_path),
+                    outputs=[str(final_mesh_path.resolve())],
+                    elapsedSeconds=round(elapsed_seconds, 3),
+                )
+            except Exception as error:
+                failed_count += 1
+                elapsed_seconds = time.perf_counter() - image_started
+                emit(
+                    "image_error",
+                    f"{error} after {format_elapsed(elapsed_seconds)}",
+                    path=str(image_path),
+                    elapsedSeconds=round(elapsed_seconds, 3),
+                    traceback=traceback.format_exc(),
+                )
+
+        batch_elapsed = format_elapsed(time.perf_counter() - batch_started)
+        if failed_count:
+            emit("done", f"Batch finished with errors in {batch_elapsed}.", failedCount=failed_count, totalCount=total)
+        else:
+            emit("done", f"Batch finished in {batch_elapsed}.", failedCount=0, totalCount=total)
+    finally:
+        if not as_bool(options.get("keepModelsWarm"), True):
+            release_cached_pipelines(("trellis",), torch, "Released TRELLIS.2 model after batch")
+        shutil.rmtree(run_dir, ignore_errors=True)
+        os.chdir(launch_cwd)
+
+
+def run_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
+    options = job.get("options", {})
+    if normalize_model_backend(options.get("modelBackend")) == "trellis2":
+        run_trellis_generation(job, paths)
+        return
+    run_hunyuan_generation(job, paths)
 
 
 def run_managed_job(job: dict[str, Any]) -> None:
     app_data_dir = Path(job["app_data_dir"])
     options = job.get("options", {})
     pytorch_profile = normalize_pytorch_profile(options.get("runtimeProfile"))
+    model_backend = normalize_model_backend(options.get("modelBackend"))
     paths = app_paths(app_data_dir, pytorch_profile)
-    for key in ("runtime_dir", "model_dir", "output_dir", "jobs_dir"):
+    for key in ("runtime_dir", "model_dir", "output_dir", "jobs_dir", "trellis_extensions_dir", "cache_dir", "tmp_dir"):
         paths[key].mkdir(parents=True, exist_ok=True)
+    configure_portable_cache_env(paths)
 
     action = str(job.get("action", "generate"))
-    include_texture = action == "setup" or str(options.get("mode", "meshTexture")) != "meshOnly"
-    if paths["source_dir"].is_dir():
-        patch_hunyuan_source(paths["source_dir"])
     configure_cuda_device(options.get("cudaDevice", "auto"))
-    ensure_models(paths, include_texture=include_texture)
+    if model_backend == "trellis2":
+        ensure_trellis_source(paths)
+        ensure_trellis_models(paths)
+    else:
+        include_texture = action == "setup" or str(options.get("mode", "meshTexture")) != "meshOnly"
+        if paths["hunyuan_source_dir"].is_dir():
+            patch_hunyuan_source(paths["hunyuan_source_dir"])
+        ensure_hunyuan_models(paths, include_texture=include_texture)
 
     if action == "setup":
-        emit("runtime_ready", "Standalone Hunyuan runtime is ready.")
-        emit("done", "Standalone Hunyuan runtime is ready.")
+        label = "TRELLIS.2" if model_backend == "trellis2" else "Hunyuan3D"
+        emit("runtime_ready", f"Standalone {label} runtime is ready.")
+        emit("done", f"Standalone {label} runtime is ready.")
         return
 
     run_generation(job, paths)
@@ -1848,22 +2946,24 @@ def run_outer(job_path: Path) -> int:
     with job_path.open("r", encoding="utf-8") as handle:
         job = json.load(handle)
     app_data_dir = Path(job["app_data_dir"])
-    pytorch_profile = normalize_pytorch_profile(job.get("options", {}).get("runtimeProfile"))
-    python_path, paths = prepare_managed_environment(app_data_dir, pytorch_profile)
+    options = job.get("options", {})
+    pytorch_profile = normalize_pytorch_profile(options.get("runtimeProfile"))
+    model_backend = normalize_model_backend(options.get("modelBackend"))
+    python_path, paths = prepare_managed_environment(app_data_dir, pytorch_profile, model_backend)
     return reinvoke_inside_env(python_path, job_path, app_data_dir, paths)
 
 
 def run_daemon() -> int:
-    if os.environ.get("IH3D_IN_MANAGED_ENV") != "1":
+    if os.environ.get("I3D_IN_MANAGED_ENV") != "1" and os.environ.get("IH3D_IN_MANAGED_ENV") != "1":
         emit("error", "Managed worker daemon must be launched inside the app Python environment.")
         return 1
-    emit("daemon_ready", "Managed Hunyuan worker is ready.")
+    emit("daemon_ready", "Managed Image To 3D worker is ready.")
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         if line == "__shutdown__":
-            emit("daemon_exit", "Managed Hunyuan worker is shutting down.")
+            emit("daemon_exit", "Managed Image To 3D worker is shutting down.")
             return 0
         try:
             request = json.loads(line)
@@ -1892,7 +2992,7 @@ def main() -> int:
             return run_daemon()
         if args.job is None:
             parser.error("--job is required unless --daemon is used")
-        if os.environ.get("IH3D_IN_MANAGED_ENV") == "1":
+        if os.environ.get("I3D_IN_MANAGED_ENV") == "1" or os.environ.get("IH3D_IN_MANAGED_ENV") == "1":
             with args.job.open("r", encoding="utf-8") as handle:
                 job = json.load(handle)
             run_managed_job(job)

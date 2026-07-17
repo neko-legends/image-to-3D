@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Image To Hunyuan 3D",
-  "version": "26.6.21",
-  "identifier": "public.image.to.hunyuan3d",
+  "productName": "Image To 3D",
+  "version": "26.7.16",
+  "identifier": "public.image.to3d",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://127.0.0.1:1430",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Image To Hunyuan 3D",
+        "title": "Image To 3D",
         "width": 1920,
         "height": 1080,
         "minWidth": 640,
@@ -44,7 +44,7 @@
       "icons/icon.ico"
     ],
     "category": "GraphicsAndDesign",
-    "shortDescription": "Standalone local Hunyuan 3D generator",
-    "longDescription": "Image To Hunyuan 3D manages its own Python runtime and Hunyuan3D 2.1 model downloads for local mesh and PBR texture generation on NVIDIA GPU systems."
+    "shortDescription": "Standalone local image-to-3D generator",
+    "longDescription": "Image To 3D manages local Python runtimes and model downloads for Hunyuan3D, TRELLIS.2, and other image-to-3D workflows on NVIDIA GPU systems."
   }
 }

@@ -67,15 +67,24 @@ p {
 
 .sidebar {
   position: relative;
-  overflow: hidden;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   border-right: 1px solid rgba(255, 145, 47, 0.18);
   background: rgba(7, 8, 7, 0.84);
-  padding: 14px 16px 34px;
+  padding: 14px 16px 16px;
 }
 
 .brand {
   display: block;
   margin-bottom: 12px;
+}
+
+.brand-heading {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  justify-content: space-between;
 }
 
 h1 {
@@ -108,13 +117,8 @@ small,
 }
 
 .app-version {
-  position: absolute;
-  right: 16px;
-  bottom: 0;
-  left: 16px;
-  padding: 6px 0 8px;
+  flex: none;
   color: #7d7167;
-  background: rgba(7, 8, 7, 0.92);
   font-size: 11px;
   font-weight: 800;
   line-height: 1;
@@ -218,6 +222,17 @@ select:disabled {
 .mode-tabs button.active {
   color: #0d0e0c;
   background: linear-gradient(180deg, #ffc166, #ff8a1c);
+}
+
+.backend-note {
+  margin-bottom: 8px;
+  padding: 9px 10px;
+  border: 1px solid rgba(89, 230, 209, 0.2);
+  border-radius: 7px;
+  color: #a8fff1;
+  background: rgba(10, 32, 31, 0.42);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .toggle {
@@ -384,6 +399,17 @@ select:disabled {
   gap: 24px;
 }
 
+.topbar > div:first-child {
+  min-width: 0;
+}
+
+.topbar h2 {
+  max-width: 980px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .eyebrow {
   color: #7fded4;
   text-transform: uppercase;
@@ -392,6 +418,7 @@ select:disabled {
 }
 
 .actions {
+  flex: none;
   display: flex;
   gap: 10px;
   align-items: center;
@@ -816,8 +843,9 @@ button:disabled {
   font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
   font-size: 12px;
   line-height: 1.55;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .modal-backdrop {

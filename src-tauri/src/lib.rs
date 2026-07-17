@@ -1,8 +1,7 @@
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{BufRead, BufReader, Cursor, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -33,15 +32,25 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const EMBEDDED_WORKER: &str = include_str!("../../python/hunyuan_worker.py");
 const ENV_MARKER: &str = ".ih3d-env-v4-ready";
-const SOURCE_MARKER: &str = ".ih3d-source-v1-ready";
-const MODEL_MARKER: &str = ".ih3d-models-v1-ready";
+const HUNYUAN_SOURCE_MARKER: &str = ".ih3d-source-v1-ready";
+const HUNYUAN_MODEL_MARKER: &str = ".ih3d-models-v1-ready";
+const TRELLIS_SOURCE_MARKER: &str = ".i3d-trellis-source-v1-ready";
+const TRELLIS_MODEL_MARKER: &str = ".i3d-trellis-models-v3-ready";
+const HUNYUAN_ENV_MARKER: &str = ".i3d-hunyuan-env-v2-ready";
+const TRELLIS_ENV_MARKER: &str = ".i3d-trellis-env-v2-ready";
 const WHEEL_MARKER: &str = ".ih3d-texture-wheels-v1-ready";
 const DEFAULT_PYTORCH_PROFILE: &str = "cu124";
 const DEFAULT_AGENT_API_PORT: u16 = 17333;
-const AGENT_APP_ID: &str = "image-to-hunyuan-3d";
-const AGENT_APP_NAME: &str = "ImageToHunyuan3D";
+const AGENT_APP_ID: &str = "image-to-3d";
+const AGENT_APP_NAME: &str = "ImageTo3D";
 const AGENT_API_BIND_ADDRESS: &str = "127.0.0.1";
 const AGENT_API_REGISTRY_FILE: &str = "agent-api-registry.json";
+const DEFAULT_WINDOW_WIDTH: u32 = 1920;
+const DEFAULT_WINDOW_HEIGHT: u32 = 1080;
+const MIN_WINDOW_WIDTH: u32 = 640;
+const MIN_WINDOW_HEIGHT: u32 = 360;
+const LANDSCAPE_WINDOW_WIDTH_RATIO: f64 = 0.5;
+const PORTRAIT_WINDOW_WIDTH_RATIO: f64 = 0.9;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,6 +66,14 @@ struct RuntimeStatus {
     source_ready: bool,
     model_dir: String,
     models_ready: bool,
+    selected_backend: String,
+    any_models_ready: bool,
+    hunyuan_env_ready: bool,
+    hunyuan_source_ready: bool,
+    hunyuan_models_ready: bool,
+    trellis_env_ready: bool,
+    trellis_source_ready: bool,
+    trellis_models_ready: bool,
     shape_model_ready: bool,
     paint_model_ready: bool,
     texture_wheels_ready: bool,
@@ -88,6 +105,8 @@ struct VramStatus {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct HunyuanOptions {
+    #[serde(default = "default_model_backend")]
+    model_backend: String,
     mode: String,
     cuda_device: String,
     runtime_profile: String,
@@ -129,6 +148,44 @@ struct HunyuanOptions {
     camera_elevations: String,
     view_weights: String,
     ortho_scale: f32,
+    #[serde(default = "default_trellis_resolution")]
+    trellis_resolution: u32,
+    #[serde(default = "default_trellis_seed")]
+    trellis_seed: u64,
+    #[serde(default = "default_randomize_seed_mode")]
+    trellis_seed_mode: String,
+    #[serde(default = "default_trellis_sparse_steps")]
+    trellis_sparse_steps: u32,
+    #[serde(default = "default_trellis_sparse_guidance")]
+    trellis_sparse_guidance: f32,
+    #[serde(default = "default_trellis_sparse_rescale")]
+    trellis_sparse_rescale: f32,
+    #[serde(default = "default_trellis_sparse_rescale_t")]
+    trellis_sparse_rescale_t: f32,
+    #[serde(default = "default_trellis_shape_steps")]
+    trellis_shape_steps: u32,
+    #[serde(default = "default_trellis_shape_guidance")]
+    trellis_shape_guidance: f32,
+    #[serde(default = "default_trellis_shape_rescale")]
+    trellis_shape_rescale: f32,
+    #[serde(default = "default_trellis_shape_rescale_t")]
+    trellis_shape_rescale_t: f32,
+    #[serde(default = "default_trellis_texture_steps")]
+    trellis_texture_steps: u32,
+    #[serde(default = "default_trellis_texture_guidance")]
+    trellis_texture_guidance: f32,
+    #[serde(default = "default_trellis_texture_rescale")]
+    trellis_texture_rescale: f32,
+    #[serde(default = "default_trellis_texture_rescale_t")]
+    trellis_texture_rescale_t: f32,
+    #[serde(default = "default_trellis_decimation_target")]
+    trellis_decimation_target: u32,
+    #[serde(default = "default_trellis_texture_size")]
+    trellis_texture_size: u32,
+    #[serde(default = "default_true")]
+    trellis_remesh: bool,
+    #[serde(default = "default_true")]
+    trellis_export_webp: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +206,19 @@ struct AgentJobRequest {
     options: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentPathRequest {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentApiAutostartConfig {
+    enabled: Option<bool>,
+    port: Option<u16>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentServerStatus {
@@ -158,6 +228,8 @@ struct AgentServerStatus {
     openapi_url: String,
     busy: bool,
     active_job_id: Option<String>,
+    active_job: Option<JobSummary>,
+    last_job: Option<JobSummary>,
     message: String,
 }
 
@@ -185,34 +257,60 @@ struct AgentApiRegistry {
     apps: Vec<AgentApiRegistryEntry>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobSummary {
+    id: String,
+    status: String,
+    message: String,
+    outputs: Vec<String>,
+    failed_count: Option<u64>,
+    total_count: Option<u64>,
+}
+
+#[derive(Default)]
+struct JobStateInner {
+    active: Option<ActiveJob>,
+    last_job: Option<JobSummary>,
+}
+
 #[derive(Clone, Default)]
 struct ActiveJobState {
-    inner: Arc<Mutex<Option<ActiveJob>>>,
+    inner: Arc<Mutex<JobStateInner>>,
 }
 
 struct ActiveJob {
     id: String,
     pid: u32,
     cancel_requested: bool,
+    summary: JobSummary,
 }
 
 impl ActiveJobState {
     fn is_busy(&self) -> Result<bool, String> {
         self.inner
             .lock()
-            .map(|job| job.is_some())
+            .map(|state| state.active.is_some())
             .map_err(|_| "Unable to lock active job state.".to_string())
     }
 
     fn start(&self, id: String, pid: u32) -> Result<(), String> {
-        let mut active = self
+        let mut state = self
             .inner
             .lock()
             .map_err(|_| "Unable to lock active job state.".to_string())?;
-        if active.is_some() {
+        if state.active.is_some() {
             return Err("Another job is already running.".to_string());
         }
-        *active = Some(ActiveJob {
+        state.active = Some(ActiveJob {
+            summary: JobSummary {
+                id: id.clone(),
+                status: "running".to_string(),
+                message: "Job started.".to_string(),
+                outputs: Vec::new(),
+                failed_count: None,
+                total_count: None,
+            },
             id,
             pid,
             cancel_requested: false,
@@ -221,65 +319,160 @@ impl ActiveJobState {
     }
 
     fn request_cancel(&self) -> Result<u32, String> {
-        let mut active = self
+        let mut state = self
             .inner
             .lock()
             .map_err(|_| "Unable to lock active job state.".to_string())?;
-        let Some(job) = active.as_mut() else {
+        let Some(job) = state.active.as_mut() else {
             return Err("No active job to cancel.".to_string());
         };
         job.cancel_requested = true;
+        job.summary.status = "canceling".to_string();
+        job.summary.message = "Cancel requested.".to_string();
         Ok(job.pid)
     }
 
     fn finish(&self, id: &str) -> Result<bool, String> {
-        let mut active = self
+        let mut state = self
             .inner
             .lock()
             .map_err(|_| "Unable to lock active job state.".to_string())?;
-        let Some(job) = active.as_ref() else {
+        let Some(job) = state.active.as_ref() else {
             return Ok(false);
         };
         if job.id != id {
             return Ok(false);
         }
+        let mut job = state
+            .active
+            .take()
+            .ok_or_else(|| "Unable to finish active job.".to_string())?;
         let canceled = job.cancel_requested;
-        *active = None;
+        if canceled {
+            job.summary.status = "canceled".to_string();
+            job.summary.message = "Job canceled.".to_string();
+        } else if matches!(job.summary.status.as_str(), "running" | "canceling") {
+            job.summary.status = "done".to_string();
+        }
+        state.last_job = Some(job.summary);
         Ok(canceled)
     }
 
     fn finish_current(&self) -> Result<Option<bool>, String> {
-        let mut active = self
+        let mut state = self
             .inner
             .lock()
             .map_err(|_| "Unable to lock active job state.".to_string())?;
-        let Some(job) = active.take() else {
+        let Some(mut job) = state.active.take() else {
             return Ok(None);
         };
-        Ok(Some(job.cancel_requested))
+        if job.cancel_requested {
+            job.summary.status = "canceled".to_string();
+            job.summary.message = "Job canceled.".to_string();
+        } else if matches!(job.summary.status.as_str(), "running" | "canceling") {
+            job.summary.status = "done".to_string();
+        }
+        let canceled = job.cancel_requested;
+        state.last_job = Some(job.summary);
+        Ok(Some(canceled))
     }
 
     fn finish_if_pid(&self, pid: u32) -> Result<Option<bool>, String> {
-        let mut active = self
+        let mut state = self
             .inner
             .lock()
             .map_err(|_| "Unable to lock active job state.".to_string())?;
-        let Some(job) = active.as_ref() else {
+        let Some(job) = state.active.as_ref() else {
             return Ok(None);
         };
         if job.pid != pid {
             return Ok(None);
         }
+        let mut job = state
+            .active
+            .take()
+            .ok_or_else(|| "Unable to finish active job.".to_string())?;
+        if job.cancel_requested {
+            job.summary.status = "canceled".to_string();
+            job.summary.message = "Job canceled.".to_string();
+        } else if matches!(job.summary.status.as_str(), "running" | "canceling") {
+            job.summary.status = "done".to_string();
+        }
         let canceled = job.cancel_requested;
-        *active = None;
+        state.last_job = Some(job.summary);
         Ok(Some(canceled))
     }
 
-    fn active_job_id(&self) -> Result<Option<String>, String> {
+    fn record_event(&self, value: &serde_json::Value) -> Result<(), String> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| "Unable to lock active job state.".to_string())?;
+        if let Some(job) = state.active.as_mut() {
+            apply_worker_event_to_summary(&mut job.summary, value);
+        }
+        Ok(())
+    }
+
+    fn record_last_event(&self, value: &serde_json::Value) -> Result<(), String> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| "Unable to lock active job state.".to_string())?;
+        if let Some(summary) = state.last_job.as_mut() {
+            apply_worker_event_to_summary(summary, value);
+        }
+        Ok(())
+    }
+
+    fn active_job_summary(&self) -> Result<Option<JobSummary>, String> {
         self.inner
             .lock()
-            .map(|job| job.as_ref().map(|job| job.id.clone()))
+            .map(|state| state.active.as_ref().map(|job| job.summary.clone()))
             .map_err(|_| "Unable to lock active job state.".to_string())
+    }
+
+    fn last_job_summary(&self) -> Result<Option<JobSummary>, String> {
+        self.inner
+            .lock()
+            .map(|state| state.last_job.clone())
+            .map_err(|_| "Unable to lock active job state.".to_string())
+    }
+}
+
+fn apply_worker_event_to_summary(summary: &mut JobSummary, value: &serde_json::Value) {
+    let event_type = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
+        summary.message = message.to_string();
+    }
+    if let Some(outputs) = value.get("outputs").and_then(serde_json::Value::as_array) {
+        for output in outputs.iter().filter_map(serde_json::Value::as_str) {
+            let output = output.to_string();
+            if !summary.outputs.contains(&output) {
+                summary.outputs.push(output);
+            }
+        }
+    }
+    if let Some(failed_count) = value.get("failedCount").and_then(serde_json::Value::as_u64) {
+        summary.failed_count = Some(failed_count);
+    }
+    if let Some(total_count) = value.get("totalCount").and_then(serde_json::Value::as_u64) {
+        summary.total_count = Some(total_count);
+    }
+    match event_type {
+        "done" => {
+            summary.status = if summary.failed_count.unwrap_or(0) > 0 {
+                "error".to_string()
+            } else {
+                "done".to_string()
+            };
+        }
+        "error" => summary.status = "error".to_string(),
+        "canceled" => summary.status = "canceled".to_string(),
+        _ => {}
     }
 }
 
@@ -291,6 +484,7 @@ struct ManagedWorkerState {
 #[derive(Clone)]
 struct ManagedWorker {
     pid: u32,
+    model_backend: String,
     runtime_profile: String,
     cuda_device: String,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -299,6 +493,7 @@ struct ManagedWorker {
 impl ManagedWorkerState {
     fn get_matching(
         &self,
+        model_backend: &str,
         runtime_profile: &str,
         cuda_device: &str,
     ) -> Result<Option<ManagedWorker>, String> {
@@ -306,7 +501,8 @@ impl ManagedWorkerState {
             .lock()
             .map(|worker| {
                 worker.as_ref().and_then(|worker| {
-                    if worker.runtime_profile == runtime_profile
+                    if worker.model_backend == model_backend
+                        && worker.runtime_profile == runtime_profile
                         && worker.cuda_device == cuda_device
                     {
                         Some(worker.clone())
@@ -372,17 +568,59 @@ impl AgentServerControl {
 }
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app
+    if let Some(dir) = portable_app_data_dir() {
+        if fs::create_dir_all(&dir).is_ok() {
+            return Ok(dir);
+        }
+    }
+
+    let resolved = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("Unable to resolve app data folder: {error}"))?;
+    let dir = legacy_app_data_dir()
+        .filter(|legacy| legacy.exists() && !resolved.exists())
+        .unwrap_or(resolved);
     fs::create_dir_all(&dir)
         .map_err(|error| format!("Unable to create app data folder: {error}"))?;
     Ok(dir)
 }
 
+fn portable_app_data_dir() -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))?;
+    let has_portable_layout = exe_dir.join("python").join("hunyuan_worker.py").is_file()
+        || exe_dir
+            .join("output")
+            .join("agent-api-autostart.json")
+            .is_file()
+        || exe_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("portable"));
+    if has_portable_layout {
+        Some(exe_dir.join("data"))
+    } else {
+        None
+    }
+}
+
+fn legacy_app_data_dir() -> Option<PathBuf> {
+    if cfg!(target_os = "windows") {
+        env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|base| base.join("public.image.to.hunyuan3d"))
+    } else {
+        env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+            .map(|base| base.join("public.image.to.hunyuan3d"))
+    }
+}
+
 /// App identifier used for the shared NekoLegendsAI store.
-const NEKO_APP_SLUG: &str = "hunyuan3d";
+const NEKO_APP_SLUG: &str = "image-to-3d";
 
 /// Resolve the shared NekoLegendsAI store, hinting the default location to the
 /// executable's drive so a portable install on `D:` lands the store at
@@ -398,7 +636,6 @@ fn neko_store(app: &AppHandle) -> Result<NekoStore, String> {
         exe_dir.as_deref(),
     ))
 }
-
 
 fn env_python_path(env_dir: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
@@ -436,8 +673,12 @@ fn runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("runtime"))
 }
 
-fn source_dir(app: &AppHandle) -> Result<PathBuf, String> {
+fn hunyuan_source_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(runtime_dir(app)?.join("Hunyuan3D-2.1"))
+}
+
+fn trellis_source_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(runtime_dir(app)?.join("TRELLIS.2"))
 }
 
 fn model_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -488,12 +729,129 @@ fn env_runtime_profile(env: &Path) -> String {
     "unknown".to_string()
 }
 
+fn env_marker_value(env: &Path, wanted_key: &str) -> Option<String> {
+    let content = fs::read_to_string(env.join(ENV_MARKER)).ok()?;
+    for line in content.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == wanted_key {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
+fn env_marker_flavor(env: &Path) -> String {
+    env_marker_value(env, "runtime").unwrap_or_else(|| {
+        if env.join(ENV_MARKER).is_file() {
+            "legacy-full".to_string()
+        } else {
+            "not installed".to_string()
+        }
+    })
+}
+
+fn normalize_model_backend(value: &str) -> String {
+    match value.trim() {
+        "trellis2" | "trellis" => "trellis2".to_string(),
+        "hunyuan" | "" => "hunyuan".to_string(),
+        _ => "hunyuan".to_string(),
+    }
+}
+
+fn hunyuan_env_ready(env: &Path) -> bool {
+    env.join(HUNYUAN_ENV_MARKER).is_file()
+        || (env.join(ENV_MARKER).is_file() && env_marker_flavor(env) == "legacy-full")
+}
+
+fn trellis_env_ready(env: &Path) -> bool {
+    env.join(TRELLIS_ENV_MARKER).is_file()
+}
+
 fn default_voxel_resolution() -> u32 {
     64
 }
 
+fn default_model_backend() -> String {
+    "hunyuan".to_string()
+}
+
+fn default_randomize_seed_mode() -> String {
+    "randomize".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_trellis_resolution() -> u32 {
+    1024
+}
+
+fn default_trellis_seed() -> u64 {
+    12345
+}
+
+fn default_trellis_sparse_steps() -> u32 {
+    12
+}
+
+fn default_trellis_sparse_guidance() -> f32 {
+    7.5
+}
+
+fn default_trellis_sparse_rescale() -> f32 {
+    0.5
+}
+
+fn default_trellis_sparse_rescale_t() -> f32 {
+    3.0
+}
+
+fn default_trellis_shape_steps() -> u32 {
+    12
+}
+
+fn default_trellis_shape_guidance() -> f32 {
+    7.5
+}
+
+fn default_trellis_shape_rescale() -> f32 {
+    0.5
+}
+
+fn default_trellis_shape_rescale_t() -> f32 {
+    3.0
+}
+
+fn default_trellis_texture_steps() -> u32 {
+    12
+}
+
+fn default_trellis_texture_guidance() -> f32 {
+    3.0
+}
+
+fn default_trellis_texture_rescale() -> f32 {
+    0.5
+}
+
+fn default_trellis_texture_rescale_t() -> f32 {
+    3.0
+}
+
+fn default_trellis_decimation_target() -> u32 {
+    5_000
+}
+
+fn default_trellis_texture_size() -> u32 {
+    1024
+}
+
 fn default_hunyuan_options() -> HunyuanOptions {
     HunyuanOptions {
+        model_backend: "hunyuan".to_string(),
         mode: "meshTexture".to_string(),
         cuda_device: "auto".to_string(),
         runtime_profile: "cu124".to_string(),
@@ -502,14 +860,14 @@ fn default_hunyuan_options() -> HunyuanOptions {
         mesh_input_path: String::new(),
         recursive: true,
         overwrite: false,
-        mesh_detail: "medium".to_string(),
-        mesh_steps: 50,
+        mesh_detail: "low".to_string(),
+        mesh_steps: 24,
         mesh_guidance: 5.0,
         mesh_seed: 2,
         mesh_seed_mode: "randomize".to_string(),
         box_v: 1.01,
-        octree_resolution: 384,
-        num_chunks: 8000,
+        octree_resolution: 256,
+        num_chunks: 6000,
         mc_level: 0.0,
         mc_algo: "mc".to_string(),
         enable_flash_vdm: true,
@@ -518,7 +876,7 @@ fn default_hunyuan_options() -> HunyuanOptions {
         remove_floaters: true,
         remove_degenerate_faces: true,
         reduce_faces: true,
-        max_faces: 15000,
+        max_faces: 5000,
         smooth_normals: true,
         voxelize: false,
         voxel_resolution: 64,
@@ -533,6 +891,25 @@ fn default_hunyuan_options() -> HunyuanOptions {
         camera_elevations: "0, 0, 0, 0, 90, -90".to_string(),
         view_weights: "1, 0.1, 0.5, 0.1, 0.05, 0.05".to_string(),
         ortho_scale: 1.1,
+        trellis_resolution: default_trellis_resolution(),
+        trellis_seed: default_trellis_seed(),
+        trellis_seed_mode: default_randomize_seed_mode(),
+        trellis_sparse_steps: default_trellis_sparse_steps(),
+        trellis_sparse_guidance: default_trellis_sparse_guidance(),
+        trellis_sparse_rescale: default_trellis_sparse_rescale(),
+        trellis_sparse_rescale_t: default_trellis_sparse_rescale_t(),
+        trellis_shape_steps: default_trellis_shape_steps(),
+        trellis_shape_guidance: default_trellis_shape_guidance(),
+        trellis_shape_rescale: default_trellis_shape_rescale(),
+        trellis_shape_rescale_t: default_trellis_shape_rescale_t(),
+        trellis_texture_steps: default_trellis_texture_steps(),
+        trellis_texture_guidance: default_trellis_texture_guidance(),
+        trellis_texture_rescale: default_trellis_texture_rescale(),
+        trellis_texture_rescale_t: default_trellis_texture_rescale_t(),
+        trellis_decimation_target: default_trellis_decimation_target(),
+        trellis_texture_size: default_trellis_texture_size(),
+        trellis_remesh: true,
+        trellis_export_webp: true,
     }
 }
 
@@ -542,16 +919,22 @@ fn apply_mesh_detail_preset(options: &mut HunyuanOptions) {
             options.mesh_steps = 24;
             options.octree_resolution = 256;
             options.num_chunks = 6000;
+            options.max_faces = 5_000;
+            options.trellis_decimation_target = 5_000;
         }
         "medium" => {
             options.mesh_steps = 50;
             options.octree_resolution = 384;
             options.num_chunks = 8000;
+            options.max_faces = 20_000;
+            options.trellis_decimation_target = 20_000;
         }
         "high" => {
             options.mesh_steps = 80;
             options.octree_resolution = 512;
             options.num_chunks = 12000;
+            options.max_faces = 50_000;
+            options.trellis_decimation_target = 50_000;
         }
         "custom" => {}
         _ => {
@@ -561,7 +944,11 @@ fn apply_mesh_detail_preset(options: &mut HunyuanOptions) {
 }
 
 fn normalize_options_for_job(options: &mut HunyuanOptions) -> Result<(), String> {
+    options.model_backend = normalize_model_backend(&options.model_backend);
     apply_mesh_detail_preset(options);
+    if options.model_backend == "trellis2" {
+        options.mode = "meshTexture".to_string();
+    }
     if options.output_dir.trim().is_empty() {
         options.output_dir = default_output_dir()?.display().to_string();
     } else {
@@ -630,8 +1017,15 @@ fn write_embedded_worker(app: &AppHandle) -> Result<PathBuf, String> {
         .map(|content| content != EMBEDDED_WORKER)
         .unwrap_or(true);
     if needs_write {
-        fs::write(&worker, EMBEDDED_WORKER)
-            .map_err(|error| format!("Unable to write embedded worker: {error}"))?;
+        if let Err(error) = fs::write(&worker, EMBEDDED_WORKER) {
+            let fallback = worker_dir.join("hunyuan_worker_embedded.py");
+            fs::write(&fallback, EMBEDDED_WORKER).map_err(|fallback_error| {
+                format!(
+                    "Unable to write embedded worker: {error}; fallback copy failed: {fallback_error}"
+                )
+            })?;
+            return Ok(fallback);
+        }
     }
     Ok(worker)
 }
@@ -711,6 +1105,7 @@ fn configure_worker_command(command: &mut Command) {
         .env("PYTHONIOENCODING", "utf-8:replace")
         .env("PYTHONLEGACYWINDOWSSTDIO", "0")
         .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        .env("TQDM_DISABLE", "1")
         .env_remove("TQDM_ASCII");
     #[cfg(unix)]
     {
@@ -721,20 +1116,32 @@ fn configure_worker_command(command: &mut Command) {
 fn configure_managed_worker_env(
     command: &mut Command,
     app_data: &Path,
-    source: &Path,
+    hunyuan_source: &Path,
+    trellis_source: &Path,
     models: &Path,
 ) {
+    configure_worker_storage_env(command, models);
     command
+        .env("I3D_IN_MANAGED_ENV", "1")
+        .env("I3D_HUNYUAN_SOURCE_DIR", hunyuan_source)
+        .env("I3D_TRELLIS_SOURCE_DIR", trellis_source)
+        .env("I3D_APP_DATA_DIR", app_data)
         .env("IH3D_IN_MANAGED_ENV", "1")
-        .env("IH3D_SOURCE_DIR", source)
+        .env("IH3D_SOURCE_DIR", hunyuan_source)
         .env("IH3D_APP_DATA_DIR", app_data)
+        .env("XFORMERS_FORCE_DISABLE_TRITON", "1");
+}
+
+fn configure_worker_storage_env(command: &mut Command, models: &Path) {
+    command
+        .env("I3D_MODEL_DIR", models)
+        .env("IH3D_MODEL_DIR", models)
         .env("HF_HOME", models.join("huggingface"))
         .env("HF_HUB_CACHE", models.join("huggingface").join("hub"))
         .env(
             "TRANSFORMERS_CACHE",
             models.join("huggingface").join("transformers"),
-        )
-        .env("XFORMERS_FORCE_DISABLE_TRITON", "1");
+        );
 
     // Route pip/uv/torch caches to the shared NekoLegendsAI store so PyTorch and
     // wheel downloads are reused across every app in the suite. `models` already
@@ -853,8 +1260,10 @@ fn model_cache_has_snapshot(model_root: &Path, repo: &str) -> bool {
 
 fn runtime_ready_for_generation(app: &AppHandle, options: &HunyuanOptions) -> Result<(), String> {
     let requested_profile = normalize_runtime_profile(&options.runtime_profile);
+    let model_backend = normalize_model_backend(&options.model_backend);
     let env = env_dir_for_profile(app, &requested_profile)?;
-    let source = source_dir(app)?;
+    let hunyuan_source = hunyuan_source_dir(app)?;
+    let trellis_source = trellis_source_dir(app)?;
     let models = model_dir(app)?;
     let env_python = env_python_path(&env);
     if !env_python.is_file() || !env.join(ENV_MARKER).is_file() {
@@ -866,19 +1275,47 @@ fn runtime_ready_for_generation(app: &AppHandle, options: &HunyuanOptions) -> Re
             "The selected app runtime is installed for {installed_profile}, but this job is set to {requested_profile}. Choose Prepare to install the selected PyTorch profile."
         ));
     }
-    if !source.join(SOURCE_MARKER).is_file() {
+    if model_backend == "trellis2" {
+        if !trellis_env_ready(&env) {
+            return Err(
+                "TRELLIS.2 runtime setup is not finished yet. Choose Set up now first.".to_string(),
+            );
+        }
+        if !trellis_source.join(TRELLIS_SOURCE_MARKER).is_file() {
+            return Err(
+                "TRELLIS.2 source setup is not finished yet. Choose Set up now first.".to_string(),
+            );
+        }
+        if !models.join(TRELLIS_MODEL_MARKER).is_file() {
+            return Err(
+                "TRELLIS.2 model downloads are not finished yet. Choose Set up now first."
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+    if !hunyuan_env_ready(&env) {
         return Err(
-            "Hunyuan source setup is not finished yet. Choose Set up now first.".to_string(),
+            "Hunyuan3D runtime setup is not finished yet. Choose Set up now first.".to_string(),
         );
     }
-    if !models.join(MODEL_MARKER).is_file() {
-        return Err("Model downloads are not finished yet. Choose Set up now first.".to_string());
+    if !hunyuan_source.join(HUNYUAN_SOURCE_MARKER).is_file() {
+        return Err(
+            "Hunyuan3D source setup is not finished yet. Choose Set up now first.".to_string(),
+        );
+    }
+    if !models.join(HUNYUAN_MODEL_MARKER).is_file()
+        && !model_cache_has_snapshot(&models, "tencent/Hunyuan3D-2.1")
+    {
+        return Err(
+            "Hunyuan3D model downloads are not finished yet. Choose Set up now first.".to_string(),
+        );
     }
     if options.mode != "meshOnly" {
         if !env.join(WHEEL_MARKER).is_file() {
             return Err("Texture tools are not set up yet. Choose Set up now first.".to_string());
         }
-        if !source
+        if !hunyuan_source
             .join("hy3dpaint")
             .join("ckpt")
             .join("RealESRGAN_x4plus.pth")
@@ -891,21 +1328,48 @@ fn runtime_ready_for_generation(app: &AppHandle, options: &HunyuanOptions) -> Re
 }
 
 #[tauri::command]
-fn check_runtime(app: AppHandle, runtime_profile: Option<String>) -> Result<RuntimeStatus, String> {
+fn check_runtime(
+    app: AppHandle,
+    runtime_profile: Option<String>,
+    model_backend: Option<String>,
+) -> Result<RuntimeStatus, String> {
     let requested_profile = normalize_runtime_profile(
         runtime_profile
             .as_deref()
             .unwrap_or(DEFAULT_PYTORCH_PROFILE),
     );
+    let selected_backend = normalize_model_backend(model_backend.as_deref().unwrap_or("hunyuan"));
     let app_data = app_data_dir(&app)?;
     let worker = worker_path(&app)?;
     let env = env_dir_for_profile(&app, &requested_profile)?;
     let env_python = env_python_path(&env);
-    let source = source_dir(&app)?;
+    let hunyuan_source = hunyuan_source_dir(&app)?;
+    let trellis_source = trellis_source_dir(&app)?;
+    let source = if selected_backend == "trellis2" {
+        trellis_source.clone()
+    } else {
+        hunyuan_source.clone()
+    };
     let models = model_dir(&app)?;
     let outputs = default_output_dir()?;
     let jobs = jobs_dir(&app)?;
     let tencent_ready = model_cache_has_snapshot(&models, "tencent/Hunyuan3D-2.1");
+    let hunyuan_env_ready = hunyuan_env_ready(&env);
+    let trellis_env_ready = trellis_env_ready(&env);
+    let hunyuan_source_ready = hunyuan_source.join(HUNYUAN_SOURCE_MARKER).is_file();
+    let trellis_source_ready = trellis_source.join(TRELLIS_SOURCE_MARKER).is_file();
+    let hunyuan_models_ready = models.join(HUNYUAN_MODEL_MARKER).is_file() || tencent_ready;
+    let trellis_models_ready = models.join(TRELLIS_MODEL_MARKER).is_file();
+    let selected_models_ready = if selected_backend == "trellis2" {
+        trellis_models_ready
+    } else {
+        hunyuan_models_ready
+    };
+    let selected_source_ready = if selected_backend == "trellis2" {
+        trellis_source_ready
+    } else {
+        hunyuan_source_ready
+    };
 
     Ok(RuntimeStatus {
         python_found: find_python().is_some(),
@@ -916,14 +1380,22 @@ fn check_runtime(app: AppHandle, runtime_profile: Option<String>) -> Result<Runt
         env_python: env_python.display().to_string(),
         env_ready: env_python.is_file() && env.join(ENV_MARKER).is_file(),
         source_dir: source.display().to_string(),
-        source_ready: source.join(SOURCE_MARKER).is_file(),
+        source_ready: selected_source_ready,
         model_dir: models.display().to_string(),
-        models_ready: models.join(MODEL_MARKER).is_file(),
+        models_ready: selected_models_ready,
+        selected_backend,
+        any_models_ready: hunyuan_models_ready || trellis_models_ready,
+        hunyuan_env_ready,
+        hunyuan_source_ready,
+        hunyuan_models_ready,
+        trellis_env_ready,
+        trellis_source_ready,
+        trellis_models_ready,
         shape_model_ready: tencent_ready,
         paint_model_ready: tencent_ready
             && model_cache_has_snapshot(&models, "facebook/dinov2-giant"),
         texture_wheels_ready: env.join(WHEEL_MARKER).is_file(),
-        realesrgan_ready: source
+        realesrgan_ready: hunyuan_source
             .join("hy3dpaint")
             .join("ckpt")
             .join("RealESRGAN_x4plus.pth")
@@ -1117,8 +1589,11 @@ fn ensure_managed_worker(
     options: &HunyuanOptions,
 ) -> Result<ManagedWorker, String> {
     let runtime_profile = normalize_runtime_profile(&options.runtime_profile);
+    let model_backend = normalize_model_backend(&options.model_backend);
     let cuda_device = options.cuda_device.clone();
-    if let Some(worker) = managed_workers.get_matching(&runtime_profile, &cuda_device)? {
+    if let Some(worker) =
+        managed_workers.get_matching(&model_backend, &runtime_profile, &cuda_device)?
+    {
         return Ok(worker);
     }
     managed_workers.stop()?;
@@ -1128,7 +1603,13 @@ fn ensure_managed_worker(
     let app_data = app_data_dir(app)?;
     let mut command = Command::new(env_python_path(&env));
     configure_worker_command(&mut command);
-    configure_managed_worker_env(&mut command, &app_data, &source_dir(app)?, &model_dir(app)?);
+    configure_managed_worker_env(
+        &mut command,
+        &app_data,
+        &hunyuan_source_dir(app)?,
+        &trellis_source_dir(app)?,
+        &model_dir(app)?,
+    );
     command
         .arg(worker_path)
         .arg("--daemon")
@@ -1138,7 +1619,7 @@ fn ensure_managed_worker(
 
     let mut child = command
         .spawn()
-        .map_err(|error| format!("Unable to start managed Hunyuan worker: {error}"))?;
+        .map_err(|error| format!("Unable to start managed Image To 3D worker: {error}"))?;
     let pid = child.id();
     let stdin = child
         .stdin
@@ -1148,6 +1629,7 @@ fn ensure_managed_worker(
     let stderr = child.stderr.take();
     let worker = ManagedWorker {
         pid,
+        model_backend,
         runtime_profile,
         cuda_device,
         stdin: Arc::new(Mutex::new(stdin)),
@@ -1170,15 +1652,15 @@ fn ensure_managed_worker(
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("");
                     let completes_job = matches!(event_type, "done" | "error" | "canceled");
+                    let _ = active_jobs_for_stdout.record_event(&value);
                     let _ = app_for_stdout.emit("hunyuan-worker-event", value);
                     if completes_job {
                         let _ = active_jobs_for_stdout.finish_current();
                     }
                 } else {
-                    let _ = app_for_stdout.emit(
-                        "hunyuan-worker-event",
-                        serde_json::json!({ "type": "setup", "message": line }),
-                    );
+                    let value = serde_json::json!({ "type": "setup", "message": line });
+                    let _ = active_jobs_for_stdout.record_event(&value);
+                    let _ = app_for_stdout.emit("hunyuan-worker-event", value);
                 }
             }
         }
@@ -1202,15 +1684,13 @@ fn ensure_managed_worker(
         let active = active_jobs_for_wait.finish_if_pid(pid).unwrap_or(None);
         if let Some(was_canceled) = active {
             if was_canceled {
-                let _ = app_for_wait.emit(
-                    "hunyuan-worker-event",
-                    serde_json::json!({ "type": "canceled", "message": "Job canceled." }),
-                );
+                let value = serde_json::json!({ "type": "canceled", "message": "Job canceled." });
+                let _ = active_jobs_for_wait.record_last_event(&value);
+                let _ = app_for_wait.emit("hunyuan-worker-event", value);
             } else if !matches!(status, Ok(status) if status.success()) {
-                let _ = app_for_wait.emit(
-                    "hunyuan-worker-event",
-                    serde_json::json!({ "type": "error", "message": "Managed Hunyuan worker exited with an error." }),
-                );
+                let value = serde_json::json!({ "type": "error", "message": "Managed Image To 3D worker exited with an error." });
+                let _ = active_jobs_for_wait.record_last_event(&value);
+                let _ = app_for_wait.emit("hunyuan-worker-event", value);
             }
         }
     });
@@ -1232,7 +1712,9 @@ fn start_worker_job_core(
     if action == "generate" && paths.is_empty() {
         return Err("No input images were provided.".to_string());
     }
+    let requested_backend = normalize_model_backend(&options.model_backend);
     if action == "generate"
+        && requested_backend != "trellis2"
         && options.mode == "textureOnly"
         && options.mesh_input_path.trim().is_empty()
     {
@@ -1289,9 +1771,12 @@ fn start_worker_job_core(
         configure_managed_worker_env(
             &mut command,
             &app_data,
-            &source_dir(&app)?,
+            &hunyuan_source_dir(&app)?,
+            &trellis_source_dir(&app)?,
             &model_dir(&app)?,
         );
+    } else {
+        configure_worker_storage_env(&mut command, &model_dir(&app)?);
     }
     command
         .arg(worker)
@@ -1302,7 +1787,7 @@ fn start_worker_job_core(
 
     let mut child = command
         .spawn()
-        .map_err(|error| format!("Unable to start Hunyuan worker: {error}"))?;
+        .map_err(|error| format!("Unable to start Image To 3D worker: {error}"))?;
     let child_pid = child.id();
     if let Err(error) = active_jobs.start(job_id.clone(), child_pid) {
         let _ = kill_process_tree(child_pid);
@@ -1314,6 +1799,7 @@ fn start_worker_job_core(
     let app_for_stdout = app.clone();
     let app_for_stderr = app.clone();
     let app_for_wait = app.clone();
+    let active_jobs_for_stdout = active_jobs.clone();
     let active_jobs_for_wait = active_jobs.clone();
     let job_id_for_wait = job_id.clone();
 
@@ -1322,12 +1808,12 @@ fn start_worker_job_core(
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                    let _ = active_jobs_for_stdout.record_event(&value);
                     let _ = app_for_stdout.emit("hunyuan-worker-event", value);
                 } else {
-                    let _ = app_for_stdout.emit(
-                        "hunyuan-worker-event",
-                        serde_json::json!({ "type": "setup", "message": line }),
-                    );
+                    let value = serde_json::json!({ "type": "setup", "message": line });
+                    let _ = active_jobs_for_stdout.record_event(&value);
+                    let _ = app_for_stdout.emit("hunyuan-worker-event", value);
                 }
             }
         }
@@ -1351,21 +1837,19 @@ fn start_worker_job_core(
             .finish(&job_id_for_wait)
             .unwrap_or(false);
         if was_canceled {
-            let _ = app_for_wait.emit(
-                "hunyuan-worker-event",
-                serde_json::json!({
-                    "type": "canceled",
-                    "message": "Job canceled."
-                }),
-            );
+            let value = serde_json::json!({
+                "type": "canceled",
+                "message": "Job canceled."
+            });
+            let _ = active_jobs_for_wait.record_last_event(&value);
+            let _ = app_for_wait.emit("hunyuan-worker-event", value);
         } else if !matches!(status, Ok(status) if status.success()) {
-            let _ = app_for_wait.emit(
-                "hunyuan-worker-event",
-                serde_json::json!({
-                    "type": "error",
-                    "message": "Hunyuan worker exited with an error."
-                }),
-            );
+            let value = serde_json::json!({
+                "type": "error",
+                "message": "Image To 3D worker exited with an error."
+            });
+            let _ = active_jobs_for_wait.record_last_event(&value);
+            let _ = app_for_wait.emit("hunyuan-worker-event", value);
         }
     });
 
@@ -1412,7 +1896,7 @@ fn prepare_runtime(
 }
 
 #[tauri::command]
-fn start_hunyuan_job(
+fn start_generation_job(
     app: AppHandle,
     active_jobs: State<'_, ActiveJobState>,
     managed_workers: State<'_, ManagedWorkerState>,
@@ -1442,6 +1926,7 @@ fn reset_python_runtime(
     active_jobs: State<'_, ActiveJobState>,
     managed_workers: State<'_, ManagedWorkerState>,
     runtime_profile: Option<String>,
+    model_backend: Option<String>,
 ) -> Result<RuntimeStatus, String> {
     if active_jobs.is_busy()? {
         return Err("Wait for the current job to finish before resetting the runtime.".to_string());
@@ -1457,7 +1942,7 @@ fn reset_python_runtime(
         fs::remove_dir_all(&env)
             .map_err(|error| format!("Unable to reset Python runtime: {error}"))?;
     }
-    check_runtime(app, Some(requested_profile))
+    check_runtime(app, Some(requested_profile), model_backend)
 }
 
 #[tauri::command]
@@ -1466,17 +1951,19 @@ fn unload_models(
     active_jobs: State<'_, ActiveJobState>,
     managed_workers: State<'_, ManagedWorkerState>,
     runtime_profile: Option<String>,
+    model_backend: Option<String>,
 ) -> Result<RuntimeStatus, String> {
     if active_jobs.is_busy()? {
         return Err("Wait for the current job to finish before unloading models.".to_string());
     }
     managed_workers.stop()?;
-    check_runtime(app, runtime_profile)
+    check_runtime(app, runtime_profile, model_backend)
 }
 
 struct HttpRequest {
     method: String,
     path: String,
+    query: Option<String>,
     body: Vec<u8>,
 }
 
@@ -1597,7 +2084,9 @@ fn agent_status_from(
             .map_err(|_| "Unable to lock agent server state.".to_string())?;
         (control.enabled, control.port())
     };
-    let active_job_id = active_jobs.active_job_id()?;
+    let active_job = active_jobs.active_job_summary()?;
+    let active_job_id = active_job.as_ref().map(|job| job.id.clone());
+    let last_job = active_jobs.last_job_summary()?;
     let status = AgentServerStatus {
         enabled,
         port,
@@ -1605,6 +2094,8 @@ fn agent_status_from(
         openapi_url: format!("{}/openapi.json", agent_api_url(port)),
         busy: active_job_id.is_some(),
         active_job_id,
+        active_job,
+        last_job,
         message: if enabled {
             "Agent API is enabled.".to_string()
         } else {
@@ -1665,14 +2156,22 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let raw_path = parts.next().unwrap_or("/").to_string();
-    let path = raw_path.split('?').next().unwrap_or("/").to_string();
+    let (path, query) = match raw_path.split_once('?') {
+        Some((path, query)) => (path.to_string(), Some(query.to_string())),
+        None => (raw_path, None),
+    };
     let body_start = header_end + 4;
     let body = if body_start <= data.len() {
         data[body_start..].to_vec()
     } else {
         Vec::new()
     };
-    Ok(HttpRequest { method, path, body })
+    Ok(HttpRequest {
+        method,
+        path,
+        query,
+        body,
+    })
 }
 
 fn find_header_end(data: &[u8]) -> Option<usize> {
@@ -1709,7 +2208,7 @@ fn agent_openapi(port: u16) -> serde_json::Value {
     serde_json::json!({
         "openapi": "3.1.0",
         "info": {
-            "title": "Image To Hunyuan 3D Agent API",
+            "title": "Image To 3D Agent API",
             "version": env!("CARGO_PKG_VERSION")
         },
         "servers": [{ "url": agent_api_url(port) }],
@@ -1721,7 +2220,11 @@ fn agent_openapi(port: u16) -> serde_json::Value {
             "/prepare": { "post": { "summary": "Prepare the standalone runtime" } },
             "/reset-runtime": { "post": { "summary": "Reset the managed Python runtime" } },
             "/unload-models": { "post": { "summary": "Stop the warm worker and release loaded models" } },
-            "/generate": { "post": { "summary": "Start a Hunyuan generation job" } },
+            "/open-output-folder": { "post": { "summary": "Open the default output folder" } },
+            "/open-runtime-folder": { "post": { "summary": "Open the app runtime folder" } },
+            "/open-path": { "post": { "summary": "Open a local file or folder" } },
+            "/open-containing-folder": { "post": { "summary": "Open the containing folder for a local path" } },
+            "/generate": { "post": { "summary": "Start an Image To 3D generation job" } },
             "/cancel": { "post": { "summary": "Cancel the active job" } }
         }
     })
@@ -1735,6 +2238,31 @@ fn parse_agent_job_request(body: &[u8]) -> Result<AgentJobRequest, String> {
         });
     }
     serde_json::from_slice(body).map_err(|error| format!("Invalid JSON request: {error}"))
+}
+
+fn parse_agent_path_request(body: &[u8]) -> Result<AgentPathRequest, String> {
+    if body.is_empty() {
+        return Err("Request body must include a path.".to_string());
+    }
+    let request: AgentPathRequest =
+        serde_json::from_slice(body).map_err(|error| format!("Invalid JSON request: {error}"))?;
+    if request.path.trim().is_empty() {
+        return Err("Request path cannot be empty.".to_string());
+    }
+    Ok(request)
+}
+
+fn query_value(query: Option<&str>, name: &str) -> Option<String> {
+    query.and_then(|query| {
+        query.split('&').find_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            if key == name && !value.trim().is_empty() {
+                Some(value.trim().to_string())
+            } else {
+                None
+            }
+        })
+    })
 }
 
 fn agent_options_from_request(
@@ -1756,9 +2284,15 @@ fn agent_options_from_request(
     let base = merged
         .as_object_mut()
         .ok_or_else(|| "Unable to merge default options.".to_string())?;
-    let mesh_numbers_overridden = ["meshSteps", "octreeResolution", "numChunks"]
-        .iter()
-        .any(|key| overrides.contains_key(*key));
+    let mesh_numbers_overridden = [
+        "meshSteps",
+        "octreeResolution",
+        "numChunks",
+        "maxFaces",
+        "trellisDecimationTarget",
+    ]
+    .iter()
+    .any(|key| overrides.contains_key(*key));
     if mesh_numbers_overridden && !overrides.contains_key("meshDetail") {
         base.insert(
             "meshDetail".to_string(),
@@ -1781,7 +2315,7 @@ fn handle_agent_route(
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => Ok(serde_json::json!({
             "ok": true,
-            "service": "Image To Hunyuan 3D",
+            "service": "Image To 3D",
             "version": env!("CARGO_PKG_VERSION"),
             "url": agent_status_from(agent_state, active_jobs)?.url
         })),
@@ -1792,8 +2326,12 @@ fn handle_agent_route(
             let status = agent_status_from(agent_state, active_jobs)?;
             serde_json::to_value(status).map_err(|error| error.to_string())
         }
-        ("GET", "/runtime") => serde_json::to_value(check_runtime(app.clone(), None)?)
-            .map_err(|error| error.to_string()),
+        ("GET", "/runtime") => {
+            let runtime_profile = query_value(request.query.as_deref(), "runtimeProfile");
+            let model_backend = query_value(request.query.as_deref(), "modelBackend");
+            serde_json::to_value(check_runtime(app.clone(), runtime_profile, model_backend)?)
+                .map_err(|error| error.to_string())
+        }
         ("GET", "/vram") => {
             serde_json::to_value(get_vram_status()).map_err(|error| error.to_string())
         }
@@ -1855,6 +2393,24 @@ fn handle_agent_route(
                 );
             }
             managed_workers.stop()?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        ("POST", "/open-output-folder") => {
+            open_output_folder(app.clone())?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        ("POST", "/open-runtime-folder") => {
+            open_runtime_folder(app.clone())?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        ("POST", "/open-path") => {
+            let request = parse_agent_path_request(&request.body)?;
+            open_path(app.clone(), request.path)?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
+        ("POST", "/open-containing-folder") => {
+            let request = parse_agent_path_request(&request.body)?;
+            open_containing_folder(app.clone(), request.path)?;
             Ok(serde_json::json!({ "ok": true }))
         }
         ("POST", "/cancel") => {
@@ -2001,17 +2557,145 @@ fn set_agent_server_enabled(
     )
 }
 
+fn agent_api_autostart_config_path() -> Option<PathBuf> {
+    env::current_exe().ok().and_then(|exe| {
+        exe.parent()
+            .map(|parent| parent.join("output").join("agent-api-autostart.json"))
+    })
+}
+
+fn read_agent_api_autostart_config() -> Option<AgentApiAutostartConfig> {
+    let path = agent_api_autostart_config_path()?;
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
 fn agent_api_autostart_requested() -> bool {
-    std::env::var("IH3D_AGENT_API")
+    if read_agent_api_autostart_config()
+        .and_then(|config| config.enabled)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    std::env::var("I3D_AGENT_API")
+        .or_else(|_| std::env::var("IH3D_AGENT_API"))
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
 }
 
 fn agent_api_autostart_port() -> Option<u16> {
-    std::env::var("IH3D_AGENT_API_PORT")
+    if let Some(port) = read_agent_api_autostart_config()
+        .and_then(|config| config.port)
+        .filter(|port| *port > 0)
+    {
+        return Some(port);
+    }
+    std::env::var("I3D_AGENT_API_PORT")
+        .or_else(|_| std::env::var("IH3D_AGENT_API_PORT"))
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .filter(|port| *port > 0)
+}
+
+fn env_truthy(name: &str) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn agent_api_headless_requested() -> bool {
+    env::args().any(|arg| arg == "--headless" || arg == "--serve-agent-api")
+        || env_truthy("NEKO_AGENT_HEADLESS")
+        || env_truthy("I3D_HEADLESS")
+        || env_truthy("IH3D_HEADLESS")
+}
+
+fn agent_api_cli_port() -> Option<u16> {
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--agent-api-port" || arg == "--agent-port" {
+            return args.next().and_then(|value| value.parse::<u16>().ok());
+        }
+        if let Some(value) = arg
+            .strip_prefix("--agent-api-port=")
+            .or_else(|| arg.strip_prefix("--agent-port="))
+        {
+            return value.parse::<u16>().ok();
+        }
+    }
+    env::var("I3D_AGENT_API_PORT")
+        .or_else(|_| env::var("IH3D_AGENT_API_PORT"))
+        .or_else(|_| env::var("NEKO_AGENT_API_PORT"))
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|port| *port > 0)
+}
+
+fn hide_main_window(app: &tauri::App) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
+fn clamp_window_dimension(value: u32, min: u32, monitor_max: u32) -> u32 {
+    let max = monitor_max.max(1);
+    value.max(min.min(max)).min(max)
+}
+
+fn initial_window_size(monitor_width: u32, monitor_height: u32) -> tauri::PhysicalSize<u32> {
+    let width_ratio = if monitor_width < monitor_height {
+        PORTRAIT_WINDOW_WIDTH_RATIO
+    } else {
+        LANDSCAPE_WINDOW_WIDTH_RATIO
+    };
+    let aspect = DEFAULT_WINDOW_HEIGHT as f64 / DEFAULT_WINDOW_WIDTH as f64;
+    let mut width = (monitor_width as f64 * width_ratio).round();
+    let mut height = (width * aspect).round();
+    let max_height = (monitor_height as f64 * 0.9).round().max(1.0);
+
+    if height > max_height {
+        height = max_height;
+        width = (height / aspect).round();
+    }
+
+    tauri::PhysicalSize::new(width.max(1.0) as u32, height.max(1.0) as u32)
+}
+
+fn apply_initial_window_size(app: &tauri::App) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let monitor_size = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())
+        .map(|monitor| *monitor.size());
+    let monitor_width = monitor_size
+        .as_ref()
+        .map(|size| size.width)
+        .unwrap_or(DEFAULT_WINDOW_WIDTH);
+    let monitor_height = monitor_size
+        .as_ref()
+        .map(|size| size.height)
+        .unwrap_or(DEFAULT_WINDOW_HEIGHT);
+    let size = initial_window_size(monitor_width, monitor_height);
+    let size = tauri::PhysicalSize::new(
+        clamp_window_dimension(size.width, MIN_WINDOW_WIDTH, monitor_width),
+        clamp_window_dimension(size.height, MIN_WINDOW_HEIGHT, monitor_height),
+    );
+
+    if let Err(error) = window.set_size(tauri::Size::Physical(size)) {
+        eprintln!("Failed to initialize window size: {error}");
+    }
+    let _ = window.center();
 }
 
 pub fn run() {
@@ -2022,18 +2706,25 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            if agent_api_autostart_requested() {
+            let headless = agent_api_headless_requested();
+            if headless {
+                hide_main_window(app);
+            } else {
+                apply_initial_window_size(app);
+            }
+            if agent_api_autostart_requested() || headless {
                 let handle = app.handle().clone();
                 let agent_state = app.state::<AgentServerState>().inner().clone();
                 let active_jobs = app.state::<ActiveJobState>().inner().clone();
                 let managed_workers = app.state::<ManagedWorkerState>().inner().clone();
+                let port = agent_api_cli_port().or_else(agent_api_autostart_port);
                 if let Err(error) = set_agent_server_enabled_inner(
                     handle,
                     &agent_state,
                     &active_jobs,
                     &managed_workers,
                     true,
-                    agent_api_autostart_port(),
+                    port,
                 ) {
                     eprintln!("Unable to start Agent API: {error}");
                 }
@@ -2061,7 +2752,7 @@ pub fn run() {
             reset_python_runtime,
             resolve_inputs,
             set_agent_server_enabled,
-            start_hunyuan_job,
+            start_generation_job,
             unload_models
         ])
         .run(tauri::generate_context!())

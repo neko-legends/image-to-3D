@@ -1,9 +1,10 @@
-# Runtime notes for Image To Hunyuan 3D
+# Runtime notes for Image To 3D
 #
 # Standalone direction:
 # - No repository .venv is used or committed.
 # - The app creates its own Python environment under the app data folder:
-#   %APPDATA%\public.image.to.hunyuan3d\python-env-cu124 or python-env-cu128
+#   %APPDATA%\public.image.to3d\python-env-cu124 or python-env-cu128
+#   Existing installs in %APPDATA%\public.image.to.hunyuan3d are reused.
 # - Source, model caches, jobs, and outputs also live under app data.
 #
 # First-run runtime plan:
@@ -20,6 +21,10 @@
 # - Texture conditioning: facebook/dinov2-giant
 # - RealESRGAN: RealESRGAN_x4plus.pth from xinntao/Real-ESRGAN
 # - Background removal: rembg with onnxruntime-gpu preferred, CPU fallback
+# - Shared HF stack: transformers==5.12.1, huggingface-hub==1.19.0,
+#   tokenizers==0.22.2. TRELLIS.2 needs the DINOv3 classes from the 5.x line.
+#   Hunyuan3D's diffusers 0.30 imports legacy Transformers weight-name
+#   constants, so the worker installs a small runtime shim before Hunyuan imports.
 #
 # The app installs a curated inference dependency set, not the full upstream
 # requirements.txt. The full file includes demo/API/training packages such as

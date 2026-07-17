@@ -9,11 +9,30 @@ import uuid
 from pathlib import Path
 
 
-APP_ID = "public.image.to.hunyuan3d"
+APP_ID = "public.image.to3d"
+LEGACY_APP_ID = "public.image.to.hunyuan3d"
 MESH_DETAIL_PRESETS = {
-    "low": {"meshSteps": 24, "octreeResolution": 256, "numChunks": 6000},
-    "medium": {"meshSteps": 50, "octreeResolution": 384, "numChunks": 8000},
-    "high": {"meshSteps": 80, "octreeResolution": 512, "numChunks": 12000},
+    "low": {
+        "meshSteps": 24,
+        "octreeResolution": 256,
+        "numChunks": 6000,
+        "maxFaces": 5000,
+        "trellisDecimationTarget": 5000,
+    },
+    "medium": {
+        "meshSteps": 50,
+        "octreeResolution": 384,
+        "numChunks": 8000,
+        "maxFaces": 20000,
+        "trellisDecimationTarget": 20000,
+    },
+    "high": {
+        "meshSteps": 80,
+        "octreeResolution": 512,
+        "numChunks": 12000,
+        "maxFaces": 50000,
+        "trellisDecimationTarget": 50000,
+    },
 }
 
 
@@ -36,12 +55,17 @@ os.environ.pop("TQDM_ASCII", None)
 def default_app_data_dir() -> Path:
     if os.name == "nt":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-        return base / APP_ID
-    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / APP_ID
+        modern = base / APP_ID
+        legacy = base / LEGACY_APP_ID
+        return legacy if legacy.exists() and not modern.exists() else modern
+    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    modern = base / APP_ID
+    legacy = base / LEGACY_APP_ID
+    return legacy if legacy.exists() and not modern.exists() else modern
 
 
 def default_output_dir(root: Path) -> Path:
-    portable_exe = root / "release" / "portable" / "image-to-hunyuan-3d.exe"
+    portable_exe = root / "release" / "portable" / "image-to-3d.exe"
     if portable_exe.exists():
         return portable_exe.parent / "output"
     return root / "output"
@@ -49,6 +73,7 @@ def default_output_dir(root: Path) -> Path:
 
 def default_options(root: Path) -> dict[str, object]:
     return {
+        "modelBackend": "hunyuan",
         "mode": "meshTexture",
         "cudaDevice": "auto",
         "runtimeProfile": "cu124",
@@ -57,14 +82,14 @@ def default_options(root: Path) -> dict[str, object]:
         "meshInputPath": "",
         "recursive": True,
         "overwrite": False,
-        "meshDetail": "medium",
-        "meshSteps": 50,
+        "meshDetail": "low",
+        "meshSteps": 24,
         "meshGuidance": 5.0,
         "meshSeed": 2,
         "meshSeedMode": "randomize",
         "boxV": 1.01,
-        "octreeResolution": 384,
-        "numChunks": 8000,
+        "octreeResolution": 256,
+        "numChunks": 6000,
         "mcLevel": 0.0,
         "mcAlgo": "mc",
         "enableFlashVdm": True,
@@ -73,7 +98,7 @@ def default_options(root: Path) -> dict[str, object]:
         "removeFloaters": True,
         "removeDegenerateFaces": True,
         "reduceFaces": True,
-        "maxFaces": 15000,
+        "maxFaces": 5000,
         "smoothNormals": True,
         "voxelize": False,
         "voxelResolution": 64,
@@ -88,13 +113,33 @@ def default_options(root: Path) -> dict[str, object]:
         "cameraElevations": "0, 0, 0, 0, 90, -90",
         "viewWeights": "1, 0.1, 0.5, 0.1, 0.05, 0.05",
         "orthoScale": 1.1,
+        "trellisResolution": 1024,
+        "trellisSeed": 12345,
+        "trellisSeedMode": "randomize",
+        "trellisSparseSteps": 12,
+        "trellisSparseGuidance": 7.5,
+        "trellisSparseRescale": 0.7,
+        "trellisSparseRescaleT": 5.0,
+        "trellisShapeSteps": 12,
+        "trellisShapeGuidance": 7.5,
+        "trellisShapeRescale": 0.5,
+        "trellisShapeRescaleT": 3.0,
+        "trellisTextureSteps": 12,
+        "trellisTextureGuidance": 3.0,
+        "trellisTextureRescale": 0.5,
+        "trellisTextureRescaleT": 3.0,
+        "trellisDecimationTarget": 5000,
+        "trellisTextureSize": 1024,
+        "trellisRemesh": True,
+        "trellisExportWebp": True,
     }
 
 
 def parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run Image To Hunyuan 3D without the GUI.")
+    parser = argparse.ArgumentParser(description="Run Image To 3D without the GUI.")
     parser.add_argument("inputs", nargs="*", help="Input image paths for generation.")
     parser.add_argument("--action", choices=["generate", "setup"], default="generate")
+    parser.add_argument("--model-backend", choices=["hunyuan", "trellis2"], default=None)
     parser.add_argument("--mode", choices=["meshTexture", "meshOnly", "textureOnly"], default=None)
     parser.add_argument("--cuda-device", default=None, help="CUDA GPU index to use, or auto.")
     parser.add_argument(
@@ -114,6 +159,8 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--mesh-seed-mode", choices=["fixed", "randomize"], default=None)
     parser.add_argument("--octree-resolution", type=int, default=None)
     parser.add_argument("--num-chunks", type=int, default=None)
+    parser.add_argument("--max-faces", type=int, default=None)
+    parser.add_argument("--trellis-decimation-target", type=int, default=None)
     parser.add_argument("--texture-view-size", type=int, default=None)
     parser.add_argument("--texture-size", type=int, default=None)
     parser.add_argument("--voxelize", action="store_true", help="Export a blocky voxel-style mesh instead of a smooth mesh.")
@@ -133,6 +180,8 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
                 "meshSteps": 12,
                 "octreeResolution": 256,
                 "numChunks": 6000,
+                "maxFaces": 5000,
+                "trellisDecimationTarget": 5000,
             }
         )
     if args.mesh_detail:
@@ -142,6 +191,7 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
 
     overrides = {
         "mode": args.mode,
+        "modelBackend": args.model_backend,
         "cudaDevice": args.cuda_device,
         "runtimeProfile": args.runtime_profile,
         "outputDir": str(Path(args.output_dir).resolve()) if args.output_dir else None,
@@ -155,6 +205,7 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
         "meshSeedMode": args.mesh_seed_mode,
         "textureViewSize": args.texture_view_size,
         "textureSize": args.texture_size,
+        "trellisDecimationTarget": args.trellis_decimation_target,
     }
     for key, value in overrides.items():
         if value is not None:
@@ -163,6 +214,7 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
         "meshSteps": args.mesh_steps,
         "octreeResolution": args.octree_resolution,
         "numChunks": args.num_chunks,
+        "maxFaces": args.max_faces,
     }
     if any(value is not None for value in mesh_overrides.values()):
         options["meshDetail"] = "custom"

@@ -11,6 +11,8 @@ $cargoTomlPath = Join-Path $root "src-tauri\Cargo.toml"
 $targetRelease = Join-Path $root "src-tauri\target\release"
 $bundleNsis = Join-Path $targetRelease "bundle\nsis"
 $portableDir = Join-Path $root "release\portable"
+$portableDataDir = Join-Path $portableDir "data"
+$portablePythonDir = Join-Path $portableDir "python"
 $installerDir = Join-Path $root "release\installer"
 
 function Get-TomlValue {
@@ -58,11 +60,15 @@ if (-not $installerSource) {
   throw "Installer executable was not found in $bundleNsis. Run npm run release:build first."
 }
 
-New-Item -ItemType Directory -Force -Path $portableDir, $installerDir | Out-Null
+New-Item -ItemType Directory -Force -Path $portableDir, $portableDataDir, $portablePythonDir, $installerDir | Out-Null
+foreach ($name in "jobs", "models", "outputs", "python", "runtime") {
+  New-Item -ItemType Directory -Force -Path (Join-Path $portableDataDir $name) | Out-Null
+}
 Get-ChildItem -Path $portableDir -Filter "*.exe" -File -ErrorAction SilentlyContinue | Remove-Item -Force
 Get-ChildItem -Path $installerDir -Filter "*.exe" -File -ErrorAction SilentlyContinue | Remove-Item -Force
 
 Copy-Item -Path $portableSource -Destination (Join-Path $portableDir $portableFileName) -Force
+Copy-Item -Path (Join-Path $root "python\hunyuan_worker.py") -Destination (Join-Path $portablePythonDir "hunyuan_worker.py") -Force
 Copy-Item -Path $installerSource.FullName -Destination (Join-Path $installerDir $installerSource.Name) -Force
 
 Write-Host "Release files published:"
