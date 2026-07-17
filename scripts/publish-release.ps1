@@ -60,11 +60,19 @@ if (-not $installerSource) {
   throw "Installer executable was not found in $bundleNsis. Run npm run release:build first."
 }
 
+if (Test-Path -LiteralPath $portableDir) {
+  $resolvedPortableDir = (Resolve-Path -LiteralPath $portableDir).Path
+  $expectedPortableDir = [System.IO.Path]::GetFullPath((Join-Path $root "release\portable"))
+  if ($resolvedPortableDir -ne $expectedPortableDir) {
+    throw "Refusing to clean unexpected portable directory: $resolvedPortableDir"
+  }
+  Remove-Item -LiteralPath $resolvedPortableDir -Recurse -Force
+}
+
 New-Item -ItemType Directory -Force -Path $portableDir, $portableDataDir, $portablePythonDir, $installerDir | Out-Null
 foreach ($name in "jobs", "models", "outputs", "python", "runtime") {
   New-Item -ItemType Directory -Force -Path (Join-Path $portableDataDir $name) | Out-Null
 }
-Get-ChildItem -Path $portableDir -Filter "*.exe" -File -ErrorAction SilentlyContinue | Remove-Item -Force
 Get-ChildItem -Path $installerDir -Filter "*.exe" -File -ErrorAction SilentlyContinue | Remove-Item -Force
 
 Copy-Item -Path $portableSource -Destination (Join-Path $portableDir $portableFileName) -Force
