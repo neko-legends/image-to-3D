@@ -1167,12 +1167,26 @@ function App() {
   }, [agentControlEnabled, agentPort, pushLog]);
 
   const addInputs = useCallback(
-    async (paths: string[]) => {
+    async (paths: string[], mode: "append" | "replace" = "append") => {
       if (!isTauriRuntime() || paths.length === 0) return;
       const images = await invoke<string[]>("resolve_inputs", {
         paths,
         recursive: options.recursive
       });
+      if (images.length === 0) {
+        setHeadline("No supported images found");
+        return;
+      }
+      if (mode === "replace") {
+        setQueue(images.map((path) => ({ path, status: "pending" as QueueStatus })));
+        setSelectedPath(images[0]);
+        setPreviewModelPath(null);
+        setPreviewTextureStatus(null);
+        setModelPreviewError(null);
+        setPreviewImages({});
+        setHeadline(`Loaded ${fileName(images[0])}`);
+        return;
+      }
       setQueue((current) => {
         const existing = new Set(current.map((item) => item.path));
         const additions = images
@@ -1214,7 +1228,8 @@ function App() {
         previewModel(previewableModels[0], "dropped");
         return;
       }
-      await addInputs(paths);
+      const mode = paths.length === 1 && isPreviewableImage(paths[0]) ? "replace" : "append";
+      await addInputs(paths, mode);
     },
     [addInputs, previewModel]
   );
