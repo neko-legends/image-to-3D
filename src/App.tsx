@@ -36,6 +36,9 @@ type MeshDetail = "low" | "medium" | "high" | "custom";
 type TrellisPreset = "preview" | "standard" | "quality" | "highpoly" | "custom";
 type QueueStatus = "pending" | "running" | "done" | "error" | "canceled";
 type ActiveAction = "setup" | "generate" | null;
+type ZoomableModelViewer = HTMLElement & {
+  zoom?: (steps: number) => void;
+};
 
 type RuntimeStatus = {
   pythonFound: boolean;
@@ -813,6 +816,7 @@ function App() {
   const queueRef = useRef<QueueItem[]>([]);
   const activeActionRef = useRef<ActiveAction>(null);
   const setupPromptSeenRef = useRef(false);
+  const modelViewerCleanupRef = useRef<(() => void) | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [previewModelPath, setPreviewModelPath] = useState<string | null>(null);
   const [previewModelRevision, setPreviewModelRevision] = useState(0);
@@ -867,6 +871,63 @@ function App() {
     : busy
       ? "The mesh preview appears before texturing finishes"
       : "Drop a GLB to preview";
+  const bindModelViewer = useCallback((element: HTMLElement | null) => {
+    modelViewerCleanupRef.current?.();
+    modelViewerCleanupRef.current = null;
+    if (!element) return;
+
+    const viewer = element as ZoomableModelViewer;
+    let middlePointerId: number | null = null;
+    let previousY = 0;
+
+    const finishMiddleZoom = (event: PointerEvent) => {
+      if (event.pointerId !== middlePointerId) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (element.hasPointerCapture(event.pointerId)) {
+        element.releasePointerCapture(event.pointerId);
+      }
+      middlePointerId = null;
+      element.style.cursor = "grab";
+    };
+    const startMiddleZoom = (event: PointerEvent) => {
+      if (event.button !== 1) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      middlePointerId = event.pointerId;
+      previousY = event.clientY;
+      element.setPointerCapture(event.pointerId);
+      element.style.cursor = "ns-resize";
+    };
+    const moveMiddleZoom = (event: PointerEvent) => {
+      if (event.pointerId !== middlePointerId) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const deltaY = event.clientY - previousY;
+      previousY = event.clientY;
+      if (deltaY !== 0) {
+        viewer.zoom?.(-deltaY / 30);
+      }
+    };
+    const preventMiddleClick = (event: MouseEvent) => {
+      if (event.button !== 1) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+
+    element.addEventListener("pointerdown", startMiddleZoom, true);
+    element.addEventListener("pointermove", moveMiddleZoom, true);
+    element.addEventListener("pointerup", finishMiddleZoom, true);
+    element.addEventListener("pointercancel", finishMiddleZoom, true);
+    element.addEventListener("auxclick", preventMiddleClick, true);
+    modelViewerCleanupRef.current = () => {
+      element.removeEventListener("pointerdown", startMiddleZoom, true);
+      element.removeEventListener("pointermove", moveMiddleZoom, true);
+      element.removeEventListener("pointerup", finishMiddleZoom, true);
+      element.removeEventListener("pointercancel", finishMiddleZoom, true);
+      element.removeEventListener("auxclick", preventMiddleClick, true);
+    };
+  }, []);
   const canUseDssPreview = Boolean(voxelSidecar);
   const showDssPreview = Boolean(modelUrl && dssPreviewEnabled && voxelSidecar);
   const canStart = useMemo(() => {
@@ -2319,12 +2380,14 @@ function App() {
                 ) : modelUrl ? (
                   <model-viewer
                     key={modelUrl}
+                    ref={bindModelViewer}
                     src={modelUrl}
                     camera-controls
                     auto-rotate={!busy}
                     rotation-per-second="28deg"
                     shadow-intensity="0.8"
                     exposure="1"
+                    title="Left drag to orbit. Middle drag or mouse wheel to zoom."
                   />
                 ) : (
                   <div className="preview-empty">
