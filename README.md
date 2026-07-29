@@ -10,6 +10,12 @@ TripoSplat, and TRELLIS.2.
 | TripoSplat | Gaussian splats and point-cloud-style exports | Supported model family; Tauri backend integration next |
 | TRELLIS.2 4B | O-Voxel/PBR GLB | Experimental integration |
 
+## Example Output
+
+![Clay preview of a cat wearing a witch hat, generated as a 9k-triangle mesh](assets/cat-in-hat-9k-triangles.png)
+
+*Clay preview of a generated mesh with approximately 9k triangles.*
+
 The app is designed for NVIDIA GPUs. Hunyuan3D and TRELLIS.2 are large CUDA
 workloads, and TripoSplat is also GPU-oriented; CPU generation is not a
 supported target.
