@@ -6,6 +6,7 @@ import { getCurrentWindow, PhysicalSize } from "@tauri-apps/api/window";
 import {
   Box,
   CheckCircle2,
+  Clock3,
   Cpu,
   Download,
   FolderOpen,
@@ -32,6 +33,7 @@ type PipelineMode = "meshTexture" | "meshOnly" | "textureOnly";
 type ModelBackend = "hunyuan" | "trellis2";
 type SeedMode = "fixed" | "randomize";
 type MeshDetail = "low" | "medium" | "high" | "custom";
+type TrellisPreset = "preview" | "standard" | "quality" | "highpoly" | "custom";
 type QueueStatus = "pending" | "running" | "done" | "error" | "canceled";
 type ActiveAction = "setup" | "generate" | null;
 
@@ -130,6 +132,10 @@ type ImageTo3DOptions = {
   cameraElevations: string;
   viewWeights: string;
   orthoScale: number;
+  trellisPreset: TrellisPreset;
+  trellisAutocrop: boolean;
+  trellisForceOpaque: boolean;
+  trellisAtlasPadding: number;
   trellisResolution: number;
   trellisSeed: number;
   trellisSeedMode: SeedMode;
@@ -169,6 +175,7 @@ type WorkerEvent = {
     | "stage_start"
     | "stage_done"
     | "stage_timing"
+    | "mesh_ready"
     | "image_start"
     | "image_done"
     | "image_error"
@@ -195,7 +202,7 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.7.16";
+const APP_VERSION = "v26.7.29";
 const SETTINGS_STORAGE_KEY = "imageTo3D.settings.v2";
 const PREVIOUS_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v1";
 const LEGACY_SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v3";
@@ -211,30 +218,52 @@ const backendLabels: Record<ModelBackend, string> = {
   trellis2: "TRELLIS.2 4B"
 };
 
+type JobHistoryItem = {
+  id: string;
+  backend: ModelBackend;
+  preset: string;
+  status: string;
+  message?: string | null;
+  startedAt?: string | null;
+  endedAt?: string | null;
+  elapsedSeconds?: number | null;
+  inputs: string[];
+  outputs: string[];
+  failedCount?: number | null;
+  totalCount?: number | null;
+};
+
+type PresetAverage = {
+  averageSeconds: number;
+  samples: number;
+};
+
+type JobHistoryResponse = {
+  jobs: JobHistoryItem[];
+  presetAverages: Record<string, PresetAverage>;
+};
+
 const meshDetailPresets: Record<
   Exclude<MeshDetail, "custom">,
-  Pick<ImageTo3DOptions, "meshSteps" | "octreeResolution" | "numChunks" | "maxFaces" | "trellisDecimationTarget">
+  Pick<ImageTo3DOptions, "meshSteps" | "octreeResolution" | "numChunks" | "maxFaces">
 > = {
   low: {
     meshSteps: 24,
     octreeResolution: 256,
     numChunks: 6000,
-    maxFaces: 5000,
-    trellisDecimationTarget: 5000
+    maxFaces: 5000
   },
   medium: {
     meshSteps: 50,
     octreeResolution: 384,
     numChunks: 8000,
-    maxFaces: 20000,
-    trellisDecimationTarget: 20000
+    maxFaces: 20000
   },
   high: {
     meshSteps: 80,
     octreeResolution: 512,
     numChunks: 12000,
-    maxFaces: 50000,
-    trellisDecimationTarget: 50000
+    maxFaces: 50000
   }
 };
 
@@ -243,6 +272,70 @@ const meshDetailLabels: Record<MeshDetail, string> = {
   medium: "Medium (20k)",
   high: "High (50k)",
   custom: "Custom"
+};
+
+const trellisPresetLabels: Record<TrellisPreset, string> = {
+  preview: "Preview / game-ready",
+  standard: "Standard",
+  quality: "Quality",
+  highpoly: "High-poly",
+  custom: "Custom"
+};
+
+const trellisPresets: Record<
+  Exclude<TrellisPreset, "custom">,
+  Pick<
+    ImageTo3DOptions,
+    | "trellisResolution"
+    | "trellisSparseSteps"
+    | "trellisShapeSteps"
+    | "trellisTextureSteps"
+    | "trellisTextureGuidance"
+    | "trellisDecimationTarget"
+    | "trellisTextureSize"
+    | "trellisRemesh"
+  >
+> = {
+  preview: {
+    trellisResolution: 512,
+    trellisSparseSteps: 12,
+    trellisShapeSteps: 12,
+    trellisTextureSteps: 12,
+    trellisTextureGuidance: 3,
+    trellisDecimationTarget: 20000,
+    trellisTextureSize: 1024,
+    trellisRemesh: false
+  },
+  standard: {
+    trellisResolution: 1024,
+    trellisSparseSteps: 12,
+    trellisShapeSteps: 12,
+    trellisTextureSteps: 12,
+    trellisTextureGuidance: 7.5,
+    trellisDecimationTarget: 100000,
+    trellisTextureSize: 2048,
+    trellisRemesh: false
+  },
+  quality: {
+    trellisResolution: 1024,
+    trellisSparseSteps: 25,
+    trellisShapeSteps: 25,
+    trellisTextureSteps: 25,
+    trellisTextureGuidance: 7.5,
+    trellisDecimationTarget: 200000,
+    trellisTextureSize: 2048,
+    trellisRemesh: false
+  },
+  highpoly: {
+    trellisResolution: 1024,
+    trellisSparseSteps: 25,
+    trellisShapeSteps: 25,
+    trellisTextureSteps: 25,
+    trellisTextureGuidance: 7.5,
+    trellisDecimationTarget: 500000,
+    trellisTextureSize: 4096,
+    trellisRemesh: false
+  }
 };
 
 const defaultOptions: ImageTo3DOptions = {
@@ -278,7 +371,7 @@ const defaultOptions: ImageTo3DOptions = {
   textureViewSize: 512,
   textureSteps: 15,
   textureGuidance: 3,
-  textureSize: 4096,
+  textureSize: 2048,
   textureSeed: 802344256,
   textureSeedMode: "randomize",
   unwrapMesh: true,
@@ -286,6 +379,10 @@ const defaultOptions: ImageTo3DOptions = {
   cameraElevations: "0, 0, 0, 0, 90, -90",
   viewWeights: "1, 0.1, 0.5, 0.1, 0.05, 0.05",
   orthoScale: 1.1,
+  trellisPreset: "standard",
+  trellisAutocrop: true,
+  trellisForceOpaque: true,
+  trellisAtlasPadding: 12,
   trellisResolution: 1024,
   trellisSeed: 12345,
   trellisSeedMode: "randomize",
@@ -298,12 +395,12 @@ const defaultOptions: ImageTo3DOptions = {
   trellisShapeRescale: 0.5,
   trellisShapeRescaleT: 3,
   trellisTextureSteps: 12,
-  trellisTextureGuidance: 3,
+  trellisTextureGuidance: 7.5,
   trellisTextureRescale: 0.5,
   trellisTextureRescaleT: 3,
-  trellisDecimationTarget: 5000,
-  trellisTextureSize: 1024,
-  trellisRemesh: true,
+  trellisDecimationTarget: 100000,
+  trellisTextureSize: 2048,
+  trellisRemesh: false,
   trellisExportWebp: true
 };
 
@@ -355,16 +452,25 @@ function coerceMeshDetail(value: unknown, fallback: MeshDetail): MeshDetail {
   return value === "low" || value === "medium" || value === "high" || value === "custom" ? value : fallback;
 }
 
+function coerceTrellisPreset(value: unknown, fallback: TrellisPreset): TrellisPreset {
+  return value === "preview" ||
+    value === "standard" ||
+    value === "quality" ||
+    value === "highpoly" ||
+    value === "custom"
+    ? value
+    : fallback;
+}
+
 function detailFromMeshSettings(
-  options: Pick<ImageTo3DOptions, "meshSteps" | "octreeResolution" | "numChunks" | "maxFaces" | "trellisDecimationTarget">
+  options: Pick<ImageTo3DOptions, "meshSteps" | "octreeResolution" | "numChunks" | "maxFaces">
 ): MeshDetail {
   const match = Object.entries(meshDetailPresets).find(
     ([, preset]) =>
       preset.meshSteps === options.meshSteps &&
       preset.octreeResolution === options.octreeResolution &&
       preset.numChunks === options.numChunks &&
-      preset.maxFaces === options.maxFaces &&
-      preset.trellisDecimationTarget === options.trellisDecimationTarget
+      preset.maxFaces === options.maxFaces
   );
   return (match?.[0] as MeshDetail | undefined) ?? "custom";
 }
@@ -373,6 +479,19 @@ function applyGeometryPreset(options: ImageTo3DOptions, meshDetail: MeshDetail):
   return meshDetail === "custom"
     ? { ...options, meshDetail }
     : { ...options, meshDetail, ...meshDetailPresets[meshDetail] };
+}
+
+function applyTrellisPreset(options: ImageTo3DOptions, trellisPreset: TrellisPreset): ImageTo3DOptions {
+  return trellisPreset === "custom"
+    ? { ...options, trellisPreset }
+    : { ...options, trellisPreset, ...trellisPresets[trellisPreset] };
+}
+
+function withCustomTrellisSettings(
+  options: ImageTo3DOptions,
+  changes: Partial<ImageTo3DOptions>
+): ImageTo3DOptions {
+  return { ...options, ...changes, trellisPreset: "custom" };
 }
 
 function loadSavedOptions(): ImageTo3DOptions {
@@ -403,8 +522,7 @@ function loadSavedOptions(): ImageTo3DOptions {
       meshSteps,
       octreeResolution,
       numChunks,
-      maxFaces,
-      trellisDecimationTarget
+      maxFaces
     });
     const loadedOptions: ImageTo3DOptions = {
       modelBackend: coerceModelBackend(parsed.modelBackend, defaultOptions.modelBackend),
@@ -452,6 +570,15 @@ function loadSavedOptions(): ImageTo3DOptions {
       cameraElevations: coerceString(parsed.cameraElevations, defaultOptions.cameraElevations),
       viewWeights: coerceString(parsed.viewWeights, defaultOptions.viewWeights),
       orthoScale: coerceNumber(parsed.orthoScale, defaultOptions.orthoScale, 0.1, 5),
+      trellisPreset: coerceTrellisPreset(parsed.trellisPreset, defaultOptions.trellisPreset),
+      trellisAutocrop: coerceBoolean(parsed.trellisAutocrop, defaultOptions.trellisAutocrop),
+      trellisForceOpaque: coerceBoolean(parsed.trellisForceOpaque, defaultOptions.trellisForceOpaque),
+      trellisAtlasPadding: coerceNumber(
+        parsed.trellisAtlasPadding,
+        defaultOptions.trellisAtlasPadding,
+        0,
+        64
+      ),
       trellisResolution: coerceNumber(parsed.trellisResolution, defaultOptions.trellisResolution, 512, 1536),
       trellisSeed: coerceNumber(parsed.trellisSeed, defaultOptions.trellisSeed, 0, 999999999),
       trellisSeedMode: coerceSeedMode(parsed.trellisSeedMode, defaultOptions.trellisSeedMode),
@@ -472,6 +599,7 @@ function loadSavedOptions(): ImageTo3DOptions {
       trellisRemesh: coerceBoolean(parsed.trellisRemesh, defaultOptions.trellisRemesh),
       trellisExportWebp: coerceBoolean(parsed.trellisExportWebp, defaultOptions.trellisExportWebp)
     };
+    let migratedOptions = loadedOptions;
     if (
       savedFromPreviousSettingsKey &&
       (parsed.meshDetail === undefined || parsed.meshDetail === "medium") &&
@@ -481,9 +609,12 @@ function loadSavedOptions(): ImageTo3DOptions {
       maxFaces === 15000 &&
       trellisDecimationTarget === 50000
     ) {
-      return applyGeometryPreset(loadedOptions, "low");
+      migratedOptions = applyGeometryPreset(migratedOptions, "low");
     }
-    return loadedOptions;
+    if (parsed.trellisPreset === undefined) {
+      migratedOptions = applyTrellisPreset(migratedOptions, defaultOptions.trellisPreset);
+    }
+    return migratedOptions;
   } catch {
     return defaultOptions;
   }
@@ -593,6 +724,24 @@ function formatBytes(value?: number | null) {
   return `${size.toFixed(digits)} ${units[unit]}`;
 }
 
+function formatElapsedSeconds(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "not measured";
+  const seconds = Math.round(value);
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
+  }
+  return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`;
+}
+
+function formatHistoryDate(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 function formatWorkerMessage(payload: WorkerEvent) {
   if (payload.message && isTerminalProgressLine(payload.message)) return undefined;
   if (payload.type !== "download_progress") return cleanWorkerMessage(payload.message);
@@ -664,6 +813,11 @@ function App() {
   const [showSetupPrompt, setShowSetupPrompt] = useState(false);
   const [headline, setHeadline] = useState("Prepare runtime or drop files");
   const [log, setLog] = useState<string[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [jobHistory, setJobHistory] = useState<JobHistoryResponse>({
+    jobs: [],
+    presetAverages: {}
+  });
 
   const vramDisplay = useMemo(() => formatVram(vram), [vram]);
   const rtx50RecommendationGpu = useMemo(
@@ -677,6 +831,9 @@ function App() {
   const anyBackendInstalled = Boolean(runtime?.anyModelsReady || runtime?.hunyuanModelsReady || runtime?.trellisModelsReady);
   const completeCount = useMemo(() => queue.filter((item) => item.status === "done").length, [queue]);
   const errorCount = useMemo(() => queue.filter((item) => item.status === "error").length, [queue]);
+  const selectedPresetAverage = isTrellisBackend
+    ? jobHistory.presetAverages[`trellis2:${options.trellisPreset}`]
+    : undefined;
   const selectedItem = useMemo(
     () => queue.find((item) => item.path === selectedPath) ?? queue[0],
     [queue, selectedPath]
@@ -692,7 +849,7 @@ function App() {
   const previewHint = selectedModel
     ? fileName(selectedModel)
     : busy
-      ? "Preview appears when generation finishes"
+      ? "The mesh preview appears before texturing finishes"
       : "Drop a GLB to preview";
   const canUseDssPreview = Boolean(voxelSidecar);
   const showDssPreview = Boolean(modelUrl && dssPreviewEnabled && voxelSidecar);
@@ -719,6 +876,11 @@ function App() {
   const refreshVram = useCallback(async () => {
     if (!isTauriRuntime()) return;
     setVram(await invoke<VramStatus>("get_vram_status"));
+  }, []);
+
+  const refreshJobHistory = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    setJobHistory(await invoke<JobHistoryResponse>("list_job_history"));
   }, []);
 
   const refreshAgentStatus = useCallback(async () => {
@@ -872,7 +1034,8 @@ function App() {
     void refreshRuntime().catch((error) => pushLog(`Runtime check failed: ${String(error)}`));
     void refreshVram().catch((error) => pushLog(`VRAM check failed: ${String(error)}`));
     void refreshAgentStatus().catch((error) => pushLog(`Agent API check failed: ${String(error)}`));
-  }, [pushLog, refreshAgentStatus, refreshRuntime, refreshVram]);
+    void refreshJobHistory().catch((error) => pushLog(`Job history check failed: ${String(error)}`));
+  }, [pushLog, refreshAgentStatus, refreshJobHistory, refreshRuntime, refreshVram]);
 
   useEffect(() => {
     if (!isTauriRuntime() || !agentControlEnabled) return;
@@ -941,6 +1104,21 @@ function App() {
       if ((payload.type === "stage_start" || payload.type === "model" || payload.type === "setup") && workerMessage) {
         setHeadline(workerMessage);
       }
+      if (payload.type === "mesh_ready" && payload.path) {
+        const preview = choosePreviewModel(parseOutputPaths(payload.output, payload.outputs));
+        if (preview) {
+          previewModel(preview, "generated");
+        }
+        setHeadline(workerMessage ?? `Mesh ready for ${fileName(payload.path)}. Generating texture...`);
+        setQueue((current) =>
+          current.map((item) =>
+            item.path === payload.path
+              ? { ...item, status: "running", message: "Mesh ready · generating texture" }
+              : item
+          )
+        );
+        setSelectedPath(payload.path);
+      }
       if (payload.type === "image_done" && payload.path) {
         const outputs = orderOutputPaths(parseOutputPaths(payload.output, payload.outputs));
         const preview = choosePreviewModel(outputs);
@@ -977,18 +1155,20 @@ function App() {
         activeActionRef.current = null;
         void refreshRuntime().catch(() => undefined);
         void refreshVram().catch(() => undefined);
+        void refreshJobHistory().catch(() => undefined);
       }
       if (payload.type === "error" || payload.type === "canceled") {
         setBusy(false);
         setCanceling(false);
         activeActionRef.current = null;
         setHeadline(payload.type === "canceled" ? "Canceled" : workerMessage ?? "Worker error");
+        void refreshJobHistory().catch(() => undefined);
       }
     }).then((unlisten) => {
       cleanup = unlisten;
     });
     return () => cleanup?.();
-  }, [previewModel, pushLog, refreshRuntime, refreshVram]);
+  }, [previewModel, pushLog, refreshJobHistory, refreshRuntime, refreshVram]);
 
   useEffect(() => {
     if (!selectedItem || !isTauriRuntime()) {
@@ -1586,7 +1766,7 @@ function App() {
             </div>
             <div className="split-fields">
               <label className="field">
-                <span>View</span>
+                <span>View resolution</span>
                 <input
                   type="number"
                   min="256"
@@ -1602,7 +1782,7 @@ function App() {
                 />
               </label>
               <label className="field">
-                <span>Texture</span>
+                <span>Final texture</span>
                 <input
                   type="number"
                   min="512"
@@ -1618,6 +1798,11 @@ function App() {
                 />
               </label>
             </div>
+            <small className="texture-resolution-help">
+              View resolution is processed for every camera (six by default). 1024 uses 4× the
+              pixels—and much more VRAM/time—than the recommended 512. Final texture controls the
+              exported atlas size; 2048 is recommended.
+            </small>
             <div className="split-fields">
               <label className="field">
                 <span>Steps</span>
@@ -1721,31 +1906,42 @@ function App() {
               TRELLIS.2
             </div>
             <label className="field">
+              <span>Preset</span>
+              <select
+                value={options.trellisPreset}
+                onChange={(event) =>
+                  setOptions((current) =>
+                    applyTrellisPreset(current, event.target.value as TrellisPreset)
+                  )
+                }
+              >
+                <option value="preview">{trellisPresetLabels.preview}</option>
+                <option value="standard">{trellisPresetLabels.standard}</option>
+                <option value="quality">{trellisPresetLabels.quality}</option>
+                <option value="highpoly">{trellisPresetLabels.highpoly}</option>
+                <option value="custom">{trellisPresetLabels.custom}</option>
+              </select>
+              <small className="preset-meta">
+                {selectedPresetAverage
+                  ? `Measured average ${formatElapsedSeconds(selectedPresetAverage.averageSeconds)} per asset across ${selectedPresetAverage.samples} run${selectedPresetAverage.samples === 1 ? "" : "s"}`
+                  : "A measured average will appear after the first completed run."}
+              </small>
+            </label>
+            <label className="field">
               <span>Resolution</span>
               <select
                 value={options.trellisResolution}
                 onChange={(event) =>
-                  setOptions((current) => ({ ...current, trellisResolution: Number(event.target.value) || 1024 }))
+                  setOptions((current) =>
+                    withCustomTrellisSettings(current, {
+                      trellisResolution: Number(event.target.value) || 1024
+                    })
+                  )
                 }
               >
                 <option value={512}>512</option>
                 <option value={1024}>1024 cascade</option>
                 <option value={1536}>1536 cascade</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Geometry</span>
-              <select
-                value={options.meshDetail}
-                onChange={(event) => {
-                  const meshDetail = event.target.value as MeshDetail;
-                  setOptions((current) => applyGeometryPreset(current, meshDetail));
-                }}
-              >
-                <option value="low">{meshDetailLabels.low}</option>
-                <option value="medium">{meshDetailLabels.medium}</option>
-                <option value="high">{meshDetailLabels.high}</option>
-                <option value="custom">{meshDetailLabels.custom}</option>
               </select>
             </label>
             <div className="seed-row">
@@ -1780,7 +1976,11 @@ function App() {
                   max="100"
                   value={options.trellisSparseSteps}
                   onChange={(event) =>
-                    setOptions((current) => ({ ...current, trellisSparseSteps: Number(event.target.value) || current.trellisSparseSteps }))
+                    setOptions((current) =>
+                      withCustomTrellisSettings(current, {
+                        trellisSparseSteps: Number(event.target.value) || current.trellisSparseSteps
+                      })
+                    )
                   }
                 />
               </label>
@@ -1793,7 +1993,11 @@ function App() {
                   step="0.1"
                   value={options.trellisSparseGuidance}
                   onChange={(event) =>
-                    setOptions((current) => ({ ...current, trellisSparseGuidance: Number(event.target.value) || current.trellisSparseGuidance }))
+                    setOptions((current) =>
+                      withCustomTrellisSettings(current, {
+                        trellisSparseGuidance: Number(event.target.value) || current.trellisSparseGuidance
+                      })
+                    )
                   }
                 />
               </label>
@@ -1807,7 +2011,11 @@ function App() {
                   max="100"
                   value={options.trellisShapeSteps}
                   onChange={(event) =>
-                    setOptions((current) => ({ ...current, trellisShapeSteps: Number(event.target.value) || current.trellisShapeSteps }))
+                    setOptions((current) =>
+                      withCustomTrellisSettings(current, {
+                        trellisShapeSteps: Number(event.target.value) || current.trellisShapeSteps
+                      })
+                    )
                   }
                 />
               </label>
@@ -1820,7 +2028,11 @@ function App() {
                   step="0.1"
                   value={options.trellisShapeGuidance}
                   onChange={(event) =>
-                    setOptions((current) => ({ ...current, trellisShapeGuidance: Number(event.target.value) || current.trellisShapeGuidance }))
+                    setOptions((current) =>
+                      withCustomTrellisSettings(current, {
+                        trellisShapeGuidance: Number(event.target.value) || current.trellisShapeGuidance
+                      })
+                    )
                   }
                 />
               </label>
@@ -1834,7 +2046,11 @@ function App() {
                   max="100"
                   value={options.trellisTextureSteps}
                   onChange={(event) =>
-                    setOptions((current) => ({ ...current, trellisTextureSteps: Number(event.target.value) || current.trellisTextureSteps }))
+                    setOptions((current) =>
+                      withCustomTrellisSettings(current, {
+                        trellisTextureSteps: Number(event.target.value) || current.trellisTextureSteps
+                      })
+                    )
                   }
                 />
               </label>
@@ -1847,7 +2063,11 @@ function App() {
                   step="0.1"
                   value={options.trellisTextureGuidance}
                   onChange={(event) =>
-                    setOptions((current) => ({ ...current, trellisTextureGuidance: Number(event.target.value) || current.trellisTextureGuidance }))
+                    setOptions((current) =>
+                      withCustomTrellisSettings(current, {
+                        trellisTextureGuidance: Number(event.target.value) || current.trellisTextureGuidance
+                      })
+                    )
                   }
                 />
               </label>
@@ -1862,23 +2082,28 @@ function App() {
                   step="1000"
                   value={options.trellisDecimationTarget}
                   onChange={(event) =>
-                    setOptions((current) => ({
-                      ...current,
-                      meshDetail: "custom",
-                      trellisDecimationTarget: Number(event.target.value) || current.trellisDecimationTarget
-                    }))
+                    setOptions((current) =>
+                      withCustomTrellisSettings(current, {
+                        trellisDecimationTarget:
+                          Number(event.target.value) || current.trellisDecimationTarget
+                      })
+                    )
                   }
                 />
               </label>
               <label className="field">
-                <span>Texture</span>
+                <span>Final texture</span>
                 <input
                   type="number"
                   min="512"
                   max="8192"
                   value={options.trellisTextureSize}
                   onChange={(event) =>
-                    setOptions((current) => ({ ...current, trellisTextureSize: Number(event.target.value) || current.trellisTextureSize }))
+                    setOptions((current) =>
+                      withCustomTrellisSettings(current, {
+                        trellisTextureSize: Number(event.target.value) || current.trellisTextureSize
+                      })
+                    )
                   }
                 />
               </label>
@@ -1887,9 +2112,57 @@ function App() {
               <input
                 type="checkbox"
                 checked={options.trellisRemesh}
-                onChange={(event) => setOptions((current) => ({ ...current, trellisRemesh: event.target.checked }))}
+                onChange={(event) =>
+                  setOptions((current) =>
+                    withCustomTrellisSettings(current, {
+                      trellisRemesh: event.target.checked
+                    })
+                  )
+                }
               />
               <span>Remesh GLB export</span>
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={options.trellisAutocrop}
+                onChange={(event) =>
+                  setOptions((current) => ({
+                    ...current,
+                    trellisAutocrop: event.target.checked
+                  }))
+                }
+              />
+              <span>Crop subject before TRELLIS resize</span>
+            </label>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={options.trellisForceOpaque}
+                onChange={(event) =>
+                  setOptions((current) => ({
+                    ...current,
+                    trellisForceOpaque: event.target.checked
+                  }))
+                }
+              />
+              <span>Normalize materials as opaque</span>
+            </label>
+            <label className="field">
+              <span>UV atlas padding</span>
+              <input
+                type="number"
+                min="0"
+                max="64"
+                value={options.trellisAtlasPadding}
+                onChange={(event) =>
+                  setOptions((current) => ({
+                    ...current,
+                    trellisAtlasPadding:
+                      Number(event.target.value) || (event.target.value === "0" ? 0 : current.trellisAtlasPadding)
+                  }))
+                }
+              />
             </label>
             <label className="toggle">
               <input
@@ -1918,6 +2191,13 @@ function App() {
               <button className="secondary" onClick={chooseFolder}>
                 <FolderOpen size={17} />
                 Folder
+              </button>
+              <button
+                className={`secondary ${showHistory ? "active" : ""}`}
+                onClick={() => setShowHistory((visible) => !visible)}
+              >
+                <Clock3 size={17} />
+                {showHistory ? "Queue" : "History"}
               </button>
               <button className="secondary icon" onClick={reset} title="Clear queue">
                 <RotateCcw size={17} />
@@ -2028,77 +2308,151 @@ function App() {
           </div>
 
           <section className="queue">
-            <div className="queue-header">
-              <span>Input</span>
-              <span>Status</span>
-              <span>Outputs</span>
-            </div>
-            {queue.length === 0 ? (
-              <div className="empty">
-                <TriangleAlert size={18} />
-                No images queued.
-              </div>
-            ) : (
-              queue.map((item) => (
-                <div
-                  className={`queue-row ${item.status} ${selectedItem?.path === item.path ? "selected" : ""}`}
-                  key={item.path}
-                  onClick={() => {
-                    setSelectedPath(item.path);
-                    setPreviewModelPath(null);
-                  }}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <div className="queue-input">
-                    <strong>{fileName(item.path)}</strong>
-                    <small>{item.path}</small>
+            {showHistory ? (
+              <>
+                <div className="queue-header">
+                  <span>Run</span>
+                  <span>Status</span>
+                  <span>Outputs</span>
+                </div>
+                {jobHistory.jobs.length === 0 ? (
+                  <div className="empty">
+                    <Clock3 size={18} />
+                    Completed runs will appear here.
                   </div>
-                  <div className="status">
-                    {statusIcon(item.status)}
-                    {item.message ?? item.status}
-                  </div>
-                  <div className="output-history">
-                    {(item.outputHistory?.length ?? 0) > 0 ? (
-                      <>
-                        <div className="output-files">
-                          {item.outputHistory?.map((path) => (
+                ) : (
+                  jobHistory.jobs.map((job) => (
+                    <div className={`queue-row ${job.status}`} key={job.id}>
+                      <div className="queue-input">
+                        <strong>
+                          {backendLabels[job.backend] ?? job.backend} ·{" "}
+                          {trellisPresetLabels[job.preset as TrellisPreset] ?? job.preset}
+                        </strong>
+                        <small>
+                          {formatHistoryDate(job.startedAt)} ·{" "}
+                          {fileName(job.inputs[0] ?? job.id)}
+                        </small>
+                      </div>
+                      <div className="status">
+                        <Clock3 size={18} />
+                        <div>
+                          {job.status}
+                          <small>{formatElapsedSeconds(job.elapsedSeconds)}</small>
+                        </div>
+                      </div>
+                      <div className="output-history">
+                        {job.outputs.length > 0 ? (
+                          <>
+                            <div className="output-files">
+                              {job.outputs.map((path) => (
+                                <button
+                                  className={isModelFile(path) ? "output-chip model" : "output-chip"}
+                                  key={path}
+                                  title={path}
+                                  onClick={() => {
+                                    if (isPreviewableModelFile(path)) {
+                                      previewModel(path, "selected");
+                                    } else {
+                                      void openDirectPath(path);
+                                    }
+                                  }}
+                                >
+                                  {isModelFile(path) ? <Layers3 size={14} /> : <PackageOpen size={14} />}
+                                  {fileName(path)}
+                                </button>
+                              ))}
+                            </div>
                             <button
-                              className={isModelFile(path) ? "output-chip model" : "output-chip"}
-                              key={path}
-                              title={isPreviewableModelFile(path) ? "Preview in 3D viewer" : path}
+                              className="secondary icon output-folder"
+                              title="Open containing folder"
+                              onClick={() => void openContainingFolder(job.outputs[0])}
+                            >
+                              <FolderOpen size={17} />
+                            </button>
+                          </>
+                        ) : (
+                          <span className="output-empty">{job.message ?? "No outputs"}</span>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </>
+            ) : (
+              <>
+                <div className="queue-header">
+                  <span>Input</span>
+                  <span>Status</span>
+                  <span>Outputs</span>
+                </div>
+                {queue.length === 0 ? (
+                  <div className="empty">
+                    <TriangleAlert size={18} />
+                    No images queued.
+                  </div>
+                ) : (
+                  queue.map((item) => (
+                    <div
+                      className={`queue-row ${item.status} ${selectedItem?.path === item.path ? "selected" : ""}`}
+                      key={item.path}
+                      onClick={() => {
+                        setSelectedPath(item.path);
+                        setPreviewModelPath(null);
+                      }}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div className="queue-input">
+                        <strong>{fileName(item.path)}</strong>
+                        <small>{item.path}</small>
+                      </div>
+                      <div className="status">
+                        {statusIcon(item.status)}
+                        {item.message ?? item.status}
+                      </div>
+                      <div className="output-history">
+                        {(item.outputHistory?.length ?? 0) > 0 ? (
+                          <>
+                            <div className="output-files">
+                              {item.outputHistory?.map((path) => (
+                                <button
+                                  className={isModelFile(path) ? "output-chip model" : "output-chip"}
+                                  key={path}
+                                  title={isPreviewableModelFile(path) ? "Preview in 3D viewer" : path}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    if (isPreviewableModelFile(path)) {
+                                      previewModel(path, "selected");
+                                      return;
+                                    }
+                                    void openDirectPath(path);
+                                  }}
+                                >
+                                  {isModelFile(path) ? <Layers3 size={14} /> : <PackageOpen size={14} />}
+                                  {fileName(path)}
+                                </button>
+                              ))}
+                            </div>
+                            <button
+                              className="secondary icon output-folder"
+                              title="Open containing folder"
                               onClick={(event) => {
                                 event.stopPropagation();
-                                if (isPreviewableModelFile(path)) {
-                                  previewModel(path, "selected");
-                                  return;
-                                }
-                                void openDirectPath(path);
+                                const first = item.outputHistory?.[0];
+                                if (first) void openContainingFolder(first);
                               }}
                             >
-                              {isModelFile(path) ? <Layers3 size={14} /> : <PackageOpen size={14} />}
-                              {fileName(path)}
+                              <FolderOpen size={17} />
                             </button>
-                          ))}
-                        </div>
-                        <button
-                          className="secondary icon output-folder"
-                          title="Open containing folder"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            const first = item.outputHistory?.[0];
-                            if (first) void openContainingFolder(first);
-                          }}
-                        >
-                          <FolderOpen size={17} />
-                        </button>
-                      </>
-                    ) : (
-                      <span className="output-empty">Pending</span>
-                    )}
-                  </div>
-                </div>
-              ))
+                          </>
+                        ) : (
+                          <span className="output-empty">Pending</span>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </>
             )}
           </section>
 

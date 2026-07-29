@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 import venv
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -56,7 +57,7 @@ HUNYUAN_MODEL_MARKER = ".ih3d-models-v1-ready"
 TRELLIS_SOURCE_MARKER = ".i3d-trellis-source-v1-ready"
 TRELLIS_MODEL_MARKER = ".i3d-trellis-models-v3-ready"
 HUNYUAN_ENV_MARKER = ".i3d-hunyuan-env-v2-ready"
-TRELLIS_ENV_MARKER = ".i3d-trellis-env-v2-ready"
+TRELLIS_ENV_MARKER = ".i3d-trellis-env-v3-ready"
 WHEEL_MARKER = ".ih3d-texture-wheels-v1-ready"
 VOXEL_DSS_SIDECAR_MAX_CELLS = 300_000
 BOOTSTRAP_PACKAGES = ["pip>=24.3", "setuptools<81", "wheel>=0.43"]
@@ -141,6 +142,7 @@ TRELLIS_BASIC_PACKAGES = [
     "igraph",
     "pymeshfix",
     "xatlas",
+    "pygltflib==1.16.3",
 ]
 TRELLIS_UTILS3D_PACKAGE = "git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8"
 TRELLIS_EXTENSION_REPOS = {
@@ -152,6 +154,51 @@ TRELLIS_EXTENSION_REPOS = {
 MESH_EXTENSIONS = {".glb", ".gltf", ".obj", ".ply"}
 PYTHON_VERSION_RE = re.compile(r"Python\s+(\d+)\.(\d+)\.(\d+)")
 MSVC_ENV_CACHE: dict[str, str] | None = None
+CURRENT_JOB_MANIFEST: dict[str, Any] | None = None
+CURRENT_JOB_MANIFEST_PATH: Path | None = None
+
+TRELLIS_PRESETS: dict[str, dict[str, Any]] = {
+    "preview": {
+        "trellisResolution": 512,
+        "trellisSparseSteps": 12,
+        "trellisShapeSteps": 12,
+        "trellisTextureSteps": 12,
+        "trellisTextureGuidance": 3.0,
+        "trellisDecimationTarget": 20_000,
+        "trellisTextureSize": 1024,
+        "trellisRemesh": False,
+    },
+    "standard": {
+        "trellisResolution": 1024,
+        "trellisSparseSteps": 12,
+        "trellisShapeSteps": 12,
+        "trellisTextureSteps": 12,
+        "trellisTextureGuidance": 7.5,
+        "trellisDecimationTarget": 100_000,
+        "trellisTextureSize": 2048,
+        "trellisRemesh": False,
+    },
+    "quality": {
+        "trellisResolution": 1024,
+        "trellisSparseSteps": 25,
+        "trellisShapeSteps": 25,
+        "trellisTextureSteps": 25,
+        "trellisTextureGuidance": 7.5,
+        "trellisDecimationTarget": 200_000,
+        "trellisTextureSize": 2048,
+        "trellisRemesh": False,
+    },
+    "highpoly": {
+        "trellisResolution": 1024,
+        "trellisSparseSteps": 25,
+        "trellisShapeSteps": 25,
+        "trellisTextureSteps": 25,
+        "trellisTextureGuidance": 7.5,
+        "trellisDecimationTarget": 500_000,
+        "trellisTextureSize": 4096,
+        "trellisRemesh": False,
+    },
+}
 
 
 def normalize_pytorch_profile(value: Any) -> str:
@@ -205,6 +252,17 @@ def normalize_model_backend(value: Any) -> str:
     return "hunyuan"
 
 
+def apply_trellis_preset(options: dict[str, Any]) -> None:
+    preset_name = str(options.get("trellisPreset", "standard")).strip().lower()
+    if preset_name == "custom":
+        return
+    preset = TRELLIS_PRESETS.get(preset_name)
+    if preset is None:
+        options["trellisPreset"] = "custom"
+        return
+    options.update(preset)
+
+
 def env_dir_for_profile(app_data_dir: Path, pytorch_profile: Any = None) -> Path:
     profile = normalize_pytorch_profile(pytorch_profile)
     profiled_env = app_data_dir / f"python-env-{profile}"
@@ -218,11 +276,158 @@ def env_dir_for_profile(app_data_dir: Path, pytorch_profile: Any = None) -> Path
     return profiled_env
 
 
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def recover_interrupted_manifests(history_dir: Path) -> None:
+    if not history_dir.is_dir():
+        return
+    for manifest_path in history_dir.glob("*.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest.get("status") not in {"running", "canceling"}:
+                continue
+            manifest["status"] = "interrupted"
+            manifest["message"] = "The previous worker stopped before this job completed."
+            manifest["endedAt"] = utc_now_iso()
+            started_epoch = manifest.get("_startedEpoch")
+            if isinstance(started_epoch, (int, float)):
+                manifest["elapsedSeconds"] = round(max(0.0, time.time() - started_epoch), 3)
+            write_json_atomic(manifest_path, manifest)
+        except Exception:
+            continue
+
+
+def begin_job_manifest(job: dict[str, Any], paths: dict[str, Path], backend: str) -> None:
+    global CURRENT_JOB_MANIFEST, CURRENT_JOB_MANIFEST_PATH
+    options = dict(job.get("options", {}))
+    history_dir = paths["jobs_dir"] / "history"
+    recover_interrupted_manifests(history_dir)
+    job_id = str(job.get("job_id") or f"job-{int(time.time())}")
+    preset = (
+        str(options.get("trellisPreset", "custom"))
+        if backend == "trellis2"
+        else f"{options.get('mode', 'meshTexture')}:{options.get('meshDetail', 'custom')}"
+    )
+    started_epoch = time.time()
+    CURRENT_JOB_MANIFEST_PATH = history_dir / f"{job_id}.json"
+    CURRENT_JOB_MANIFEST = {
+        "schema": "image-to-3d.job.v1",
+        "id": job_id,
+        "action": str(job.get("action", "generate")),
+        "backend": backend,
+        "preset": preset,
+        "status": "running",
+        "message": "Job started.",
+        "startedAt": utc_now_iso(),
+        "endedAt": None,
+        "elapsedSeconds": None,
+        "_startedEpoch": started_epoch,
+        "inputs": [str(value) for value in job.get("paths", [])],
+        "outputs": [],
+        "failedCount": None,
+        "totalCount": len(job.get("paths", [])),
+        "options": options,
+        "items": [],
+        "stages": [],
+    }
+    write_json_atomic(CURRENT_JOB_MANIFEST_PATH, CURRENT_JOB_MANIFEST)
+
+
+def manifest_item(path: str) -> dict[str, Any]:
+    assert CURRENT_JOB_MANIFEST is not None
+    items = CURRENT_JOB_MANIFEST.setdefault("items", [])
+    for item in items:
+        if item.get("path") == path:
+            return item
+    item = {"path": path, "status": "pending", "message": "", "outputs": []}
+    items.append(item)
+    return item
+
+
+def record_job_event(event: dict[str, Any]) -> None:
+    if CURRENT_JOB_MANIFEST is None or CURRENT_JOB_MANIFEST_PATH is None:
+        return
+    try:
+        event_type = str(event.get("type", ""))
+        message = event.get("message")
+        if isinstance(message, str) and message:
+            CURRENT_JOB_MANIFEST["message"] = message
+        path = event.get("path")
+        if isinstance(path, str) and path:
+            item = manifest_item(path)
+            if event_type == "image_start":
+                item["status"] = "running"
+                item["startedAt"] = utc_now_iso()
+            elif event_type == "image_done":
+                item["status"] = "done"
+                item["endedAt"] = utc_now_iso()
+                item["message"] = message or "Saved"
+                item["elapsedSeconds"] = event.get("elapsedSeconds")
+                item["outputs"] = list(event.get("outputs") or [])
+                if isinstance(event.get("stats"), dict):
+                    item["stats"] = event["stats"]
+            elif event_type == "image_error":
+                item["status"] = "error"
+                item["endedAt"] = utc_now_iso()
+                item["message"] = message or "Generation failed"
+                item["elapsedSeconds"] = event.get("elapsedSeconds")
+
+        if event_type == "stage_timing":
+            CURRENT_JOB_MANIFEST.setdefault("stages", []).append(
+                {
+                    "stage": event.get("stage"),
+                    "path": event.get("path"),
+                    "elapsedSeconds": event.get("elapsedSeconds"),
+                    "recordedAt": utc_now_iso(),
+                }
+            )
+        outputs = event.get("outputs")
+        if isinstance(outputs, list):
+            known_outputs = CURRENT_JOB_MANIFEST.setdefault("outputs", [])
+            for output in outputs:
+                if isinstance(output, str) and output not in known_outputs:
+                    known_outputs.append(output)
+        if isinstance(event.get("failedCount"), int):
+            CURRENT_JOB_MANIFEST["failedCount"] = event["failedCount"]
+        if isinstance(event.get("totalCount"), int):
+            CURRENT_JOB_MANIFEST["totalCount"] = event["totalCount"]
+
+        terminal = event_type in {"done", "error", "canceled"}
+        if event_type == "done":
+            CURRENT_JOB_MANIFEST["status"] = (
+                "error" if int(CURRENT_JOB_MANIFEST.get("failedCount") or 0) > 0 else "done"
+            )
+        elif event_type in {"error", "canceled"}:
+            CURRENT_JOB_MANIFEST["status"] = event_type
+        if terminal:
+            CURRENT_JOB_MANIFEST["endedAt"] = utc_now_iso()
+            started_epoch = CURRENT_JOB_MANIFEST.get("_startedEpoch")
+            if isinstance(started_epoch, (int, float)):
+                CURRENT_JOB_MANIFEST["elapsedSeconds"] = round(
+                    max(0.0, time.time() - started_epoch),
+                    3,
+                )
+        write_json_atomic(CURRENT_JOB_MANIFEST_PATH, CURRENT_JOB_MANIFEST)
+    except Exception:
+        # History must never make generation fail.
+        return
+
+
 def emit(event_type: str, message: str | None = None, **payload: Any) -> None:
     event: dict[str, Any] = {"type": event_type}
     if message:
         event["message"] = message
     event.update(payload)
+    record_job_event(event)
     print(json.dumps(event, ensure_ascii=True), flush=True)
 
 
@@ -574,52 +779,30 @@ class SilentProgressWriter:
 def hf_snapshot_progress_class(label: str):
     from tqdm.auto import tqdm
 
+    status_emitted = False
+
     class HfSnapshotProgress(tqdm):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self._ih3d_label = label
-            self._ih3d_last_percent: float | None = None
-            self._ih3d_last_current: int | None = None
-            self._ih3d_last_total: int | None = None
-            self._ih3d_last_emit = 0.0
+            nonlocal status_emitted
             kwargs["file"] = SilentProgressWriter()
             kwargs["ascii"] = True
             kwargs["dynamic_ncols"] = False
             kwargs.setdefault("mininterval", 0.5)
             super().__init__(*args, **kwargs)
-            self._emit_progress(force=True)
-
-        def update(self, n: float = 1) -> bool | None:
-            result = super().update(n)
-            self._emit_progress()
-            return result
-
-        def close(self) -> None:
-            self._emit_progress(force=True)
-            super().close()
-
-        def _emit_progress(self, force: bool = False) -> None:
-            total = int(self.total or 0)
-            current = int(self.n or 0)
-            percent = round(current / total * 100, 1) if total > 0 else None
-            now = time.monotonic()
-            if (
-                current == self._ih3d_last_current
-                and total == self._ih3d_last_total
-                and (force or percent == self._ih3d_last_percent or now - self._ih3d_last_emit < 1.0)
-            ):
-                return
-            self._ih3d_last_percent = percent
-            self._ih3d_last_current = current
-            self._ih3d_last_total = total
-            self._ih3d_last_emit = now
-            emit_item_progress(self._ih3d_label, current, total or None)
+            if not status_emitted:
+                emit(
+                    "download_progress",
+                    f"Downloading {label}. Please wait...",
+                    name=label,
+                )
+                status_emitted = True
 
     return HfSnapshotProgress
 
 
 def download_file(url: str, destination: Path, label: str) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(url, headers={"User-Agent": "ImageTo3D/26.7.16"})
+    request = urllib.request.Request(url, headers={"User-Agent": "ImageTo3D/26.7.29"})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             total_header = response.headers.get("Content-Length")
@@ -2124,11 +2307,58 @@ def shape_cache_key(options: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def configure_hunyuan_surface_extractor(
+    shape_pipeline: Any,
+    surface_extractors: dict[str, Any],
+    mc_algo: str,
+) -> None:
+    if mc_algo not in surface_extractors:
+        raise RuntimeError(
+            f"Unknown Hunyuan3D surface extractor {mc_algo!r}; "
+            f"available extractors: {', '.join(surface_extractors)}"
+        )
+    shape_pipeline.vae.surface_extractor = surface_extractors[mc_algo]()
+
+
+def export_hunyuan_latents(
+    shape_pipeline: Any,
+    latents: Any,
+    options: dict[str, Any],
+    surface_extractors: dict[str, Any],
+) -> list[Any]:
+    mc_algo = str(options.get("mcAlgo", "mc")) or "mc"
+    configure_hunyuan_surface_extractor(shape_pipeline, surface_extractors, mc_algo)
+    export_options = {
+        "output_type": "trimesh",
+        "box_v": as_float(options.get("boxV"), 1.01, 0.1, 5),
+        "octree_resolution": as_int(options.get("octreeResolution"), 384, 64, 2048),
+        "mc_level": as_float(options.get("mcLevel"), 0.0, -10, 10),
+        "mc_algo": None,
+        "num_chunks": as_int(options.get("numChunks"), 8000, 1024, 999999),
+        "enable_pbar": False,
+    }
+    try:
+        return shape_pipeline._export(latents, **export_options)
+    except RuntimeError as error:
+        flash_enabled = getattr(shape_pipeline, "_ih3d_flashvdm_enabled", False)
+        if not flash_enabled or "expected a non-empty list of Tensors" not in str(error):
+            raise
+        emit(
+            "setup",
+            "Fast VAE mesh decode found no surface candidates. "
+            "Retrying with the stable dense decoder...",
+        )
+        shape_pipeline.vae.enable_flashvdm_decoder(enabled=False)
+        shape_pipeline._ih3d_flashvdm_enabled = False
+        configure_hunyuan_surface_extractor(shape_pipeline, surface_extractors, mc_algo)
+        return shape_pipeline._export(latents, **export_options)
+
+
 def paint_cache_key(options: dict[str, Any]) -> tuple[Any, ...]:
     return (
         texture_view_count(options),
         as_int(options.get("textureViewSize"), 512, 256, 2048),
-        as_int(options.get("textureSize"), 4096, 512, 8192),
+        as_int(options.get("textureSize"), 2048, 512, 8192),
     )
 
 
@@ -2244,6 +2474,8 @@ def cleanup_job_scratch(jobs_dir: Path, keep: Path | None = None) -> None:
     keep_resolved = keep.resolve() if keep else None
     for entry in jobs_dir.iterdir():
         if not entry.is_dir():
+            continue
+        if entry.name == "history":
             continue
         try:
             if keep_resolved and entry.resolve() == keep_resolved:
@@ -2510,6 +2742,7 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     patch_transformers_weight_constants_for_diffusers()
 
     import torch
+    from hy3dshape.models.autoencoders import SurfaceExtractors
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
     from textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
 
@@ -2533,6 +2766,7 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     total = len(input_paths)
     failed_count = 0
     batch_started = time.perf_counter()
+    begin_job_manifest(job, paths, "hunyuan")
 
     try:
         shape_pipeline = None
@@ -2548,7 +2782,10 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                 emit_timing("Shape model load", model_started)
             else:
                 emit("model", "Reusing loaded Hunyuan3D shape model")
-            if as_bool(options.get("enableFlashVdm"), False):
+            octree_resolution = as_int(options.get("octreeResolution"), 384, 64, 2048)
+            flash_requested = as_bool(options.get("enableFlashVdm"), False)
+            flash_enabled = flash_requested and octree_resolution > 256
+            if flash_enabled:
                 flash_started = time.perf_counter()
                 if getattr(shape_pipeline, "_ih3d_flashvdm_enabled", False):
                     pass
@@ -2566,6 +2803,14 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                         emit("setup", f"FlashVDM setup skipped: {error}")
                 else:
                     emit("setup", "FlashVDM setup skipped: upstream pipeline does not expose enable_flashvdm")
+            elif getattr(shape_pipeline, "_ih3d_flashvdm_enabled", False):
+                shape_pipeline.vae.enable_flashvdm_decoder(enabled=False)
+                shape_pipeline._ih3d_flashvdm_enabled = False
+            if flash_requested and not flash_enabled:
+                emit(
+                    "setup",
+                    "Using the stable VAE mesh decoder at 256 octree resolution.",
+                )
             if as_bool(options.get("forceOffload"), False) and hasattr(shape_pipeline, "enable_model_cpu_offload"):
                 if not getattr(shape_pipeline, "_ih3d_cpu_offload_enabled", False):
                     shape_pipeline.enable_model_cpu_offload()
@@ -2604,18 +2849,22 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                     generator = torch.Generator(device="cuda").manual_seed(seed % (2**32))
                     stage_started = time.perf_counter()
                     emit("stage_start", f"Generating mesh for {image_path.name}", path=str(image_path))
-                    meshes = shape_pipeline(
+                    latents = shape_pipeline(
                         image=image,
                         num_inference_steps=as_int(options.get("meshSteps"), 50, 1, 200),
                         guidance_scale=as_float(options.get("meshGuidance"), 5.0, 0, 30),
                         generator=generator,
-                        box_v=as_float(options.get("boxV"), 1.01, 0.1, 5),
-                        octree_resolution=as_int(options.get("octreeResolution"), 384, 64, 2048),
-                        mc_level=as_float(options.get("mcLevel"), 0.0, -10, 10),
-                        mc_algo=str(options.get("mcAlgo", "mc")) or None,
-                        num_chunks=as_int(options.get("numChunks"), 8000, 1024, 999999),
+                        output_type="latent",
+                        mc_algo=None,
                         enable_pbar=False,
                     )
+                    meshes = export_hunyuan_latents(
+                        shape_pipeline,
+                        latents,
+                        options,
+                        SurfaceExtractors,
+                    )
+                    del latents
                     emit_timing("Mesh generation", stage_started, path=str(image_path))
                     mesh = meshes[0]
                     del meshes
@@ -2650,6 +2899,13 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                         reduce_exported_mesh_faces(intermediate_mesh, target_faces, image_path)
                         emit_timing("Mesh simplification", simplify_started, path=str(image_path))
                     emit("stage_done", f"Mesh generated for {image_path.name}", path=str(image_path))
+                    if mode == "meshTexture":
+                        emit(
+                            "mesh_ready",
+                            f"Mesh ready for {image_path.name}. Generating PBR texture...",
+                            path=str(image_path),
+                            output=str(intermediate_mesh.resolve()),
+                        )
 
                 if mode == "meshOnly":
                     shutil.move(str(intermediate_mesh), str(final_mesh_path))
@@ -2722,11 +2978,24 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                     traceback=traceback.format_exc(),
                 )
 
-        batch_elapsed = format_elapsed(time.perf_counter() - batch_started)
+        batch_elapsed_seconds = time.perf_counter() - batch_started
+        batch_elapsed = format_elapsed(batch_elapsed_seconds)
         if failed_count:
-            emit("done", f"Batch finished with errors in {batch_elapsed}.", failedCount=failed_count, totalCount=total)
+            emit(
+                "done",
+                f"Batch finished with errors in {batch_elapsed}.",
+                failedCount=failed_count,
+                totalCount=total,
+                elapsedSeconds=round(batch_elapsed_seconds, 3),
+            )
         else:
-            emit("done", f"Batch finished in {batch_elapsed}.", failedCount=0, totalCount=total)
+            emit(
+                "done",
+                f"Batch finished in {batch_elapsed}.",
+                failedCount=0,
+                totalCount=total,
+                elapsedSeconds=round(batch_elapsed_seconds, 3),
+            )
     finally:
         if not as_bool(options.get("keepModelsWarm"), True):
             release_cached_pipelines(
@@ -2736,6 +3005,297 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
             )
         shutil.rmtree(run_dir, ignore_errors=True)
         os.chdir(launch_cwd)
+
+
+def trellis_has_alpha(image: Any) -> bool:
+    if getattr(image, "mode", "") != "RGBA":
+        return False
+    import numpy as np
+
+    return bool(np.asarray(image)[..., 3].min() < 250)
+
+
+def trellis_autocrop_subject(
+    pipeline: Any,
+    image: Any,
+    probe_size: int = 1024,
+    output_size: int = 2048,
+    margin: float = 0.06,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Crop the subject before TRELLIS downsizes the complete source image."""
+    from PIL import Image
+    import numpy as np
+
+    if trellis_has_alpha(image):
+        alpha = np.asarray(image)[..., 3]
+        ys, xs = np.nonzero(alpha > 8)
+        if len(ys) < 16:
+            return image, None
+        full_width, full_height = image.size
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        pad = int(round(margin * max(x1 - x0, y1 - y0)))
+        box = (
+            max(0, x0 - pad),
+            max(0, y0 - pad),
+            min(full_width, x1 + pad),
+            min(full_height, y1 + pad),
+        )
+        cropped = image.crop(box)
+        return cropped, {
+            "method": "alpha",
+            "source": [full_width, full_height],
+            "crop": list(box),
+            "output": list(cropped.size),
+        }
+
+    rgb = image.convert("RGB")
+    full_width, full_height = rgb.size
+    probe = rgb
+    if max(probe.size) > probe_size:
+        scale = probe_size / max(probe.size)
+        probe = probe.resize(
+            (
+                max(1, round(full_width * scale)),
+                max(1, round(full_height * scale)),
+            ),
+            Image.Resampling.LANCZOS,
+        )
+
+    probe_mask = np.asarray(pipeline.rembg_model(probe))[..., 3]
+    ys, xs = np.nonzero(probe_mask > 0.5 * 255)
+    if len(ys) < 16:
+        return image, None
+
+    scale_x, scale_y = full_width / probe.width, full_height / probe.height
+    x0, x1 = xs.min() * scale_x, (xs.max() + 1) * scale_x
+    y0, y1 = ys.min() * scale_y, (ys.max() + 1) * scale_y
+    pad = margin * max(x1 - x0, y1 - y0)
+    box = (
+        int(max(0, x0 - pad)),
+        int(max(0, y0 - pad)),
+        int(min(full_width, x1 + pad)),
+        int(min(full_height, y1 + pad)),
+    )
+    cropped = rgb.crop(box)
+    if max(cropped.size) > output_size:
+        scale = output_size / max(cropped.size)
+        cropped = cropped.resize(
+            (
+                max(1, round(cropped.width * scale)),
+                max(1, round(cropped.height * scale)),
+            ),
+            Image.Resampling.LANCZOS,
+        )
+    isolated = pipeline.rembg_model(cropped)
+    return isolated, {
+        "method": "rmbg",
+        "source": [full_width, full_height],
+        "crop": list(box),
+        "output": list(isolated.size),
+        "subjectScale": round(max(full_width, full_height) / max(1, max(box[2] - box[0], box[3] - box[1])), 3),
+    }
+
+
+def trellis_uv_coverage_mask(model_path: Path, width: int, height: int) -> Any:
+    import cv2
+    import numpy as np
+    import trimesh
+
+    loaded = trimesh.load(str(model_path), process=False, force="scene")
+    geometries = list(getattr(loaded, "geometry", {}).values())
+    if not geometries and hasattr(loaded, "faces"):
+        geometries = [loaded]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for geometry in geometries:
+        uv = getattr(getattr(geometry, "visual", None), "uv", None)
+        faces = getattr(geometry, "faces", None)
+        if uv is None or faces is None:
+            continue
+        uv_array = np.asarray(uv, dtype=np.float32)
+        faces_array = np.asarray(faces, dtype=np.int32)
+        if len(uv_array) == 0 or len(faces_array) == 0 or faces_array.max(initial=-1) >= len(uv_array):
+            continue
+        points = np.empty((len(uv_array), 2), dtype=np.float32)
+        points[:, 0] = np.clip(uv_array[:, 0], 0.0, 1.0) * (width - 1)
+        points[:, 1] = (1.0 - np.clip(uv_array[:, 1], 0.0, 1.0)) * (height - 1)
+        contours = np.rint(points[faces_array]).astype(np.int32)
+        for start in range(0, len(contours), 20_000):
+            cv2.fillPoly(mask, list(contours[start : start + 20_000]), 255)
+    return mask > 0
+
+
+def trellis_pad_texture(image: Any, coverage: Any, padding: int) -> Any:
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    array = np.asarray(image)
+    if array.ndim == 2:
+        array = array[..., None]
+    source = np.asarray(coverage, dtype=bool)
+    if not source.any() or source.all() or padding <= 0:
+        return image
+    expanded = cv2.dilate(
+        source.astype(np.uint8),
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=padding,
+    ).astype(bool)
+    padding_area = expanded & ~source
+    if not padding_area.any():
+        return image
+
+    distance_input = (~source).astype(np.uint8)
+    distance, labels = cv2.distanceTransformWithLabels(
+        distance_input,
+        cv2.DIST_L2,
+        5,
+        labelType=cv2.DIST_LABEL_PIXEL,
+    )
+    del distance
+    max_label = int(labels.max(initial=0))
+    if max_label <= 0:
+        return image
+    channels = array.shape[2]
+    palette = np.zeros((max_label + 1, channels), dtype=array.dtype)
+    source_labels = labels[source]
+    valid = source_labels > 0
+    palette[source_labels[valid]] = array[source][valid]
+    output = array.copy()
+    target_labels = labels[padding_area]
+    output[padding_area] = palette[target_labels]
+    if output.shape[2] == 1:
+        output = output[..., 0]
+    return Image.fromarray(output, mode=image.mode)
+
+
+def trellis_glb_stats(gltf: Any, blob: bytes, padding_report: dict[str, Any]) -> dict[str, Any]:
+    import io
+    from PIL import Image
+
+    vertices = 0
+    faces = 0
+    has_uv = False
+    for mesh in gltf.meshes or []:
+        for primitive in mesh.primitives:
+            attributes = primitive.attributes
+            position = getattr(attributes, "POSITION", None)
+            if position is not None:
+                vertices += int(gltf.accessors[position].count)
+            if getattr(attributes, "TEXCOORD_0", None) is not None:
+                has_uv = True
+            if primitive.indices is not None:
+                faces += int(gltf.accessors[primitive.indices].count) // 3
+
+    largest_texture = 0
+    for image in gltf.images or []:
+        if image.bufferView is None:
+            continue
+        view = gltf.bufferViews[image.bufferView]
+        start = int(view.byteOffset or 0)
+        try:
+            with Image.open(io.BytesIO(blob[start : start + view.byteLength])) as texture:
+                largest_texture = max(largest_texture, texture.width * texture.height)
+        except Exception:
+            continue
+    coverages = [
+        float(value["coverage"])
+        for value in padding_report.values()
+        if isinstance(value, dict) and isinstance(value.get("coverage"), (int, float))
+    ]
+    return {
+        "vertices": vertices,
+        "faces": faces,
+        "hasUv": has_uv,
+        "materials": len(gltf.materials or []),
+        "textures": len(gltf.textures or []),
+        "texelsPerFace": round(largest_texture / faces, 1) if largest_texture and faces else None,
+        "atlasCoverage": round(sum(coverages) / len(coverages), 4) if coverages else None,
+    }
+
+
+def normalize_trellis_glb(target: Path, options: dict[str, Any]) -> dict[str, Any]:
+    """Normalize TRELLIS materials and pad UV atlas gutters.
+
+    Atlas-padding behavior is adapted from dotneet/image-to-3d (MIT,
+    Copyright (c) 2026 Shinji Yamada); see THIRD_PARTY_NOTICES.md.
+    """
+    import io
+
+    from PIL import Image
+    from pygltflib import BufferView, GLTF2
+
+    gltf = GLTF2().load(str(target))
+    changed_opaque = 0
+    if as_bool(options.get("trellisForceOpaque"), True):
+        for material in gltf.materials or []:
+            if material.alphaMode != "OPAQUE":
+                material.alphaMode = "OPAQUE"
+                changed_opaque += 1
+
+    padding = as_int(options.get("trellisAtlasPadding"), 12, 0, 64)
+    padding_report: dict[str, Any] = {}
+    blob = bytearray(gltf.binary_blob())
+    if padding > 0 and gltf.images and gltf.textures:
+        targets = {
+            texture.source
+            for texture in gltf.textures
+            if texture.source is not None and texture.source < len(gltf.images)
+        }
+        masks: dict[tuple[int, int], Any] = {}
+        for image_index in sorted(targets):
+            image = gltf.images[image_index]
+            if image.bufferView is None:
+                continue
+            view = gltf.bufferViews[image.bufferView]
+            start = int(view.byteOffset or 0)
+            raw = bytes(blob[start : start + view.byteLength])
+            with Image.open(io.BytesIO(raw)) as source:
+                source.load()
+                texture = source.copy()
+            key = texture.size
+            coverage = masks.get(key)
+            if coverage is None:
+                coverage = trellis_uv_coverage_mask(target, texture.width, texture.height)
+                masks[key] = coverage
+            padded = trellis_pad_texture(texture, coverage, padding)
+            mime_type = str(image.mimeType or "").lower()
+            image_format = "WEBP" if mime_type == "image/webp" else "PNG"
+            encoded = io.BytesIO()
+            save_args = {"lossless": True, "quality": 95} if image_format == "WEBP" else {}
+            padded.save(encoded, format=image_format, **save_args)
+            data = encoded.getvalue()
+            while len(blob) % 4:
+                blob.append(0)
+            offset = len(blob)
+            blob.extend(data)
+            gltf.bufferViews.append(
+                BufferView(buffer=0, byteOffset=offset, byteLength=len(data))
+            )
+            image.bufferView = len(gltf.bufferViews) - 1
+            image.mimeType = "image/webp" if image_format == "WEBP" else "image/png"
+            padding_report[f"image_{image_index}"] = {
+                "width": texture.width,
+                "height": texture.height,
+                "coverage": round(float(coverage.mean()), 4),
+                "padding": padding,
+            }
+
+    while len(blob) % 4:
+        blob.append(0)
+    if gltf.buffers:
+        gltf.buffers[0].byteLength = len(blob)
+    gltf.set_binary_blob(bytes(blob))
+    gltf.save(str(target))
+    stats = trellis_glb_stats(gltf, bytes(blob), padding_report)
+    stats.update(
+        {
+            "opaqueMaterialsNormalized": changed_opaque,
+            "atlasPadding": padding,
+            "atlas": padding_report,
+        }
+    )
+    return stats
 
 
 def trellis_pipeline_type(options: dict[str, Any]) -> str:
@@ -2757,7 +3317,7 @@ def trellis_sampler_params(options: dict[str, Any], prefix: str, defaults: tuple
     }
 
 
-def trellis_export_glb(mesh: Any, target: Path, options: dict[str, Any]) -> None:
+def trellis_export_glb(mesh: Any, target: Path, options: dict[str, Any]) -> dict[str, Any]:
     import o_voxel
 
     if hasattr(mesh, "simplify"):
@@ -2778,6 +3338,23 @@ def trellis_export_glb(mesh: Any, target: Path, options: dict[str, Any]) -> None
         verbose=True,
     )
     glb.export(str(target), extension_webp=as_bool(options.get("trellisExportWebp"), True))
+    try:
+        stats = normalize_trellis_glb(target, options)
+    except Exception as error:
+        emit("setup", f"TRELLIS.2 GLB post-processing skipped: {error}")
+        stats = {
+            "faces": int(len(getattr(mesh, "faces", []))),
+            "atlasPadding": 0,
+            "postprocessError": str(error),
+        }
+    texels_per_face = stats.get("texelsPerFace")
+    if isinstance(texels_per_face, (int, float)) and texels_per_face < 30:
+        emit(
+            "setup",
+            f"TRELLIS.2 atlas density is low ({texels_per_face:.1f} texels per face). "
+            "Use a larger texture or a lower face target if seams look blurred.",
+        )
+    return stats
 
 
 def run_trellis_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
@@ -2806,6 +3383,7 @@ def run_trellis_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     )
 
     options = job.get("options", {})
+    apply_trellis_preset(options)
     overwrite = as_bool(options.get("overwrite"), False)
     requested_output = Path(str(options.get("outputDir", "")).strip() or paths["output_dir"])
     if not requested_output.is_absolute():
@@ -2819,6 +3397,7 @@ def run_trellis_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     total = len(input_paths)
     failed_count = 0
     batch_started = time.perf_counter()
+    begin_job_manifest(job, paths, "trellis2")
 
     try:
         key = (TRELLIS_MODEL_REPO, as_bool(options.get("forceOffload"), False))
@@ -2845,6 +3424,27 @@ def run_trellis_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                 base = output_base_name(options, image_path, index, total)
                 final_mesh_path = unique_target(requested_output / f"{base}.glb", overwrite)
                 image = Image.open(image_path)
+                crop_info = None
+                if as_bool(options.get("trellisAutocrop"), True):
+                    crop_started = time.perf_counter()
+                    emit("stage_start", f"Cropping subject for {image_path.name}", path=str(image_path))
+                    try:
+                        image, crop_info = trellis_autocrop_subject(pipeline, image)
+                        if crop_info:
+                            emit(
+                                "setup",
+                                f"Subject crop {crop_info['source'][0]}x{crop_info['source'][1]} "
+                                f"to {crop_info['output'][0]}x{crop_info['output'][1]}.",
+                                path=str(image_path),
+                            )
+                    except Exception as error:
+                        crop_info = {"error": str(error)}
+                        emit(
+                            "setup",
+                            f"TRELLIS.2 subject crop skipped: {error}",
+                            path=str(image_path),
+                        )
+                    emit_timing("TRELLIS.2 subject crop", crop_started, path=str(image_path))
                 seed = seed_value(options, "trellisSeed", "trellisSeedMode")
                 stage_started = time.perf_counter()
                 emit("stage_start", f"Generating TRELLIS.2 asset for {image_path.name}", path=str(image_path))
@@ -2871,7 +3471,7 @@ def run_trellis_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                 emit_timing("TRELLIS.2 generation", stage_started, path=str(image_path))
                 export_started = time.perf_counter()
                 emit("stage_start", f"Exporting TRELLIS.2 GLB for {image_path.name}", path=str(image_path))
-                trellis_export_glb(meshes[0], final_mesh_path, options)
+                glb_stats = trellis_export_glb(meshes[0], final_mesh_path, options)
                 emit_timing("TRELLIS.2 GLB export", export_started, path=str(image_path))
                 elapsed_seconds = time.perf_counter() - image_started
                 emit(
@@ -2880,6 +3480,12 @@ def run_trellis_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                     path=str(image_path),
                     outputs=[str(final_mesh_path.resolve())],
                     elapsedSeconds=round(elapsed_seconds, 3),
+                    stats={
+                        "preset": options.get("trellisPreset", "custom"),
+                        "seed": seed,
+                        "autocrop": crop_info,
+                        "glb": glb_stats,
+                    },
                 )
             except Exception as error:
                 failed_count += 1
@@ -2892,11 +3498,24 @@ def run_trellis_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                     traceback=traceback.format_exc(),
                 )
 
-        batch_elapsed = format_elapsed(time.perf_counter() - batch_started)
+        batch_elapsed_seconds = time.perf_counter() - batch_started
+        batch_elapsed = format_elapsed(batch_elapsed_seconds)
         if failed_count:
-            emit("done", f"Batch finished with errors in {batch_elapsed}.", failedCount=failed_count, totalCount=total)
+            emit(
+                "done",
+                f"Batch finished with errors in {batch_elapsed}.",
+                failedCount=failed_count,
+                totalCount=total,
+                elapsedSeconds=round(batch_elapsed_seconds, 3),
+            )
         else:
-            emit("done", f"Batch finished in {batch_elapsed}.", failedCount=0, totalCount=total)
+            emit(
+                "done",
+                f"Batch finished in {batch_elapsed}.",
+                failedCount=0,
+                totalCount=total,
+                elapsedSeconds=round(batch_elapsed_seconds, 3),
+            )
     finally:
         if not as_bool(options.get("keepModelsWarm"), True):
             release_cached_pipelines(("trellis",), torch, "Released TRELLIS.2 model after batch")

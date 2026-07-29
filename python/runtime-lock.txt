@@ -21,6 +21,7 @@
 # - Texture conditioning: facebook/dinov2-giant
 # - RealESRGAN: RealESRGAN_x4plus.pth from xinntao/Real-ESRGAN
 # - Background removal: rembg with onnxruntime-gpu preferred, CPU fallback
+# - TRELLIS GLB inspection/padding: pygltflib==1.16.3
 # - Shared HF stack: transformers==5.12.1, huggingface-hub==1.19.0,
 #   tokenizers==0.22.2. TRELLIS.2 needs the DINOv3 classes from the 5.x line.
 #   Hunyuan3D's diffusers 0.30 imports legacy Transformers weight-name

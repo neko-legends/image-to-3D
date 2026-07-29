@@ -17,21 +17,60 @@ MESH_DETAIL_PRESETS = {
         "octreeResolution": 256,
         "numChunks": 6000,
         "maxFaces": 5000,
-        "trellisDecimationTarget": 5000,
     },
     "medium": {
         "meshSteps": 50,
         "octreeResolution": 384,
         "numChunks": 8000,
         "maxFaces": 20000,
-        "trellisDecimationTarget": 20000,
     },
     "high": {
         "meshSteps": 80,
         "octreeResolution": 512,
         "numChunks": 12000,
         "maxFaces": 50000,
-        "trellisDecimationTarget": 50000,
+    },
+}
+TRELLIS_PRESETS = {
+    "preview": {
+        "trellisResolution": 512,
+        "trellisSparseSteps": 12,
+        "trellisShapeSteps": 12,
+        "trellisTextureSteps": 12,
+        "trellisTextureGuidance": 3.0,
+        "trellisDecimationTarget": 20000,
+        "trellisTextureSize": 1024,
+        "trellisRemesh": False,
+    },
+    "standard": {
+        "trellisResolution": 1024,
+        "trellisSparseSteps": 12,
+        "trellisShapeSteps": 12,
+        "trellisTextureSteps": 12,
+        "trellisTextureGuidance": 7.5,
+        "trellisDecimationTarget": 100000,
+        "trellisTextureSize": 2048,
+        "trellisRemesh": False,
+    },
+    "quality": {
+        "trellisResolution": 1024,
+        "trellisSparseSteps": 25,
+        "trellisShapeSteps": 25,
+        "trellisTextureSteps": 25,
+        "trellisTextureGuidance": 7.5,
+        "trellisDecimationTarget": 200000,
+        "trellisTextureSize": 2048,
+        "trellisRemesh": False,
+    },
+    "highpoly": {
+        "trellisResolution": 1024,
+        "trellisSparseSteps": 25,
+        "trellisShapeSteps": 25,
+        "trellisTextureSteps": 25,
+        "trellisTextureGuidance": 7.5,
+        "trellisDecimationTarget": 500000,
+        "trellisTextureSize": 4096,
+        "trellisRemesh": False,
     },
 }
 
@@ -105,7 +144,7 @@ def default_options(root: Path) -> dict[str, object]:
         "textureViewSize": 512,
         "textureSteps": 15,
         "textureGuidance": 3.0,
-        "textureSize": 4096,
+        "textureSize": 2048,
         "textureSeed": 802344256,
         "textureSeedMode": "randomize",
         "unwrapMesh": True,
@@ -113,6 +152,10 @@ def default_options(root: Path) -> dict[str, object]:
         "cameraElevations": "0, 0, 0, 0, 90, -90",
         "viewWeights": "1, 0.1, 0.5, 0.1, 0.05, 0.05",
         "orthoScale": 1.1,
+        "trellisPreset": "standard",
+        "trellisAutocrop": True,
+        "trellisForceOpaque": True,
+        "trellisAtlasPadding": 12,
         "trellisResolution": 1024,
         "trellisSeed": 12345,
         "trellisSeedMode": "randomize",
@@ -125,12 +168,12 @@ def default_options(root: Path) -> dict[str, object]:
         "trellisShapeRescale": 0.5,
         "trellisShapeRescaleT": 3.0,
         "trellisTextureSteps": 12,
-        "trellisTextureGuidance": 3.0,
+        "trellisTextureGuidance": 7.5,
         "trellisTextureRescale": 0.5,
         "trellisTextureRescaleT": 3.0,
-        "trellisDecimationTarget": 5000,
-        "trellisTextureSize": 1024,
-        "trellisRemesh": True,
+        "trellisDecimationTarget": 100000,
+        "trellisTextureSize": 2048,
+        "trellisRemesh": False,
         "trellisExportWebp": True,
     }
 
@@ -153,6 +196,11 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--mesh-input-path", default="")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--mesh-detail", choices=["low", "medium", "high", "custom"], default=None)
+    parser.add_argument(
+        "--trellis-preset",
+        choices=["preview", "standard", "quality", "highpoly", "custom"],
+        default=None,
+    )
     parser.add_argument("--mesh-steps", type=int, default=None)
     parser.add_argument("--mesh-guidance", type=float, default=None)
     parser.add_argument("--mesh-seed", type=int, default=None)
@@ -181,13 +229,18 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
                 "octreeResolution": 256,
                 "numChunks": 6000,
                 "maxFaces": 5000,
-                "trellisDecimationTarget": 5000,
             }
         )
+        options["trellisPreset"] = "preview"
+        options.update(TRELLIS_PRESETS["preview"])
     if args.mesh_detail:
         options["meshDetail"] = args.mesh_detail
         if args.mesh_detail in MESH_DETAIL_PRESETS:
             options.update(MESH_DETAIL_PRESETS[args.mesh_detail])
+    if args.trellis_preset:
+        options["trellisPreset"] = args.trellis_preset
+        if args.trellis_preset in TRELLIS_PRESETS:
+            options.update(TRELLIS_PRESETS[args.trellis_preset])
 
     overrides = {
         "mode": args.mode,
@@ -221,6 +274,8 @@ def build_options(args: argparse.Namespace, root: Path) -> dict[str, object]:
         for key, value in mesh_overrides.items():
             if value is not None:
                 options[key] = value
+    if args.trellis_decimation_target is not None:
+        options["trellisPreset"] = "custom"
     return options
 
 

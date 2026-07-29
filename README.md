@@ -27,11 +27,13 @@ Use the app like a normal desktop tool.
    Or run the installer:
 
    ```text
-   release\installer\Image To 3D_26.7.16_x64-setup.exe
+   release\installer\Image To 3D_26.7.29_x64-setup.exe
    ```
 
 2. On first launch, the app checks what is already installed. If setup is
    needed, it asks before downloading models or installing packages.
+
+   ![One-time setup dialog for choosing a model, CUDA GPU, and PyTorch runtime](assets/first-run-setup.png)
 
 3. Add an image or a folder of images. You can also drop a `.glb` or `.gltf`
    file into the window to preview it without starting a generation job.
@@ -90,11 +92,28 @@ Use the app like a normal desktop tool.
    - `Medium` targets about 20k faces.
    - `High` targets about 50k faces.
 
+   TRELLIS.2 also has backend-specific presets:
+
+   - `Preview / game-ready` uses the 512 pipeline, 20k faces, and a 1024 texture.
+   - `Standard` uses the 1024 cascade, 100k faces, and a 2048 texture.
+   - `Quality` uses 25 sampling steps, 200k faces, and a 2048 texture.
+   - `High-poly` keeps up to 500k faces with a 4096 texture.
+
+   TRELLIS subject cropping is enabled by default so a small subject is cropped
+   before the official pipeline downsizes the full image. Exported GLBs are
+   normalized to opaque materials and receive configurable UV-atlas gutter
+   padding to reduce transparency artifacts and dark seams.
+
 8. Generated GLBs go into an `output` folder beside the running app by default.
    If you choose a different output folder, the app remembers it.
 
 The app keeps loaded models warm after generation for faster follow-up jobs. Use
 `Unload` in the Runtime panel when you want to release GPU memory.
+
+The `History` view retains generation manifests across app restarts. Each
+manifest records inputs, outputs, settings, per-image results, stage timings,
+and elapsed time. After a preset completes successfully, its measured average
+appears under the TRELLIS preset selector.
 
 ComfyUI is not required. The app manages its own Python runtime, backend source
 folders, model cache, and texture tools in app data.
@@ -145,6 +164,10 @@ If an existing install was prepared before the shared Hunyuan/TRELLIS dependency
 repair, run Prepare again for the selected backend. The app intentionally uses a
 new runtime marker so the managed Python env can be repaired instead of reusing a
 broken `transformers`/`diffusers` mix.
+
+The TRELLIS GLB inspection/padding update adds `pygltflib` to its managed
+environment. Existing TRELLIS installs therefore need one additional `Prepare`
+run; existing model downloads are reused.
 
 The gated Hugging Face dependencies are downloaded only after the user has
 accepted their upstream access terms with their own Hugging Face account/token.
@@ -210,7 +233,7 @@ npm run release:build
 Release outputs:
 
 - `release\portable\image-to-3d.exe`
-- `release\installer\Image To 3D_26.7.16_x64-setup.exe`
+- `release\installer\Image To 3D_26.7.29_x64-setup.exe`
 
 ### Headless Runner
 
@@ -232,6 +255,8 @@ JSON worker events to stdout.
 Useful flags:
 
 - `--model-backend hunyuan` or `--model-backend trellis2` selects the backend.
+- `--trellis-preset preview|standard|quality|highpoly|custom` selects a named
+  TRELLIS quality profile.
 - `--fast-preview` uses faster mesh-only settings.
 - `--cuda-device 1` selects a specific NVIDIA GPU index.
 - `--runtime-profile cu128` installs/uses the CUDA 12.8 RTX 50-series profile.
@@ -279,6 +304,7 @@ Endpoints:
 - `GET /health`
 - `GET /openapi.json`
 - `GET /status`
+- `GET /history`
 - `GET /runtime`
 - `GET /vram`
 - `POST /prepare`
@@ -330,6 +356,10 @@ Common options:
 - `textureSeed`
 - `textureSeedMode`
 - `trellisResolution`
+- `trellisPreset`
+- `trellisAutocrop`
+- `trellisForceOpaque`
+- `trellisAtlasPadding`
 - `trellisSparseSteps`
 - `trellisSparseGuidance`
 - `trellisShapeSteps`
@@ -435,4 +465,10 @@ loading.
 - Add low-VRAM presets once they are validated.
 - Add richer texture controls where Tencent's direct API exposes them.
 - Add AuraSR-style optional view upscaling without requiring ComfyUI.
-- Add retained job history with thumbnails and turntable previews.
+- Add thumbnails and turntable previews to the retained job history.
+
+## Third-Party Notices
+
+See `THIRD_PARTY_NOTICES.md` for attribution covering the TRELLIS subject crop,
+UV-atlas padding, export inspection, preset, and manifest work adapted from
+`dotneet/image-to-3d`.

@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::{BufRead, BufReader, Cursor, Read, Write},
     net::{TcpListener, TcpStream},
@@ -37,7 +38,7 @@ const HUNYUAN_MODEL_MARKER: &str = ".ih3d-models-v1-ready";
 const TRELLIS_SOURCE_MARKER: &str = ".i3d-trellis-source-v1-ready";
 const TRELLIS_MODEL_MARKER: &str = ".i3d-trellis-models-v3-ready";
 const HUNYUAN_ENV_MARKER: &str = ".i3d-hunyuan-env-v2-ready";
-const TRELLIS_ENV_MARKER: &str = ".i3d-trellis-env-v2-ready";
+const TRELLIS_ENV_MARKER: &str = ".i3d-trellis-env-v3-ready";
 const WHEEL_MARKER: &str = ".ih3d-texture-wheels-v1-ready";
 const DEFAULT_PYTORCH_PROFILE: &str = "cu124";
 const DEFAULT_AGENT_API_PORT: u16 = 17333;
@@ -148,6 +149,14 @@ struct HunyuanOptions {
     camera_elevations: String,
     view_weights: String,
     ortho_scale: f32,
+    #[serde(default = "default_trellis_preset")]
+    trellis_preset: String,
+    #[serde(default = "default_true")]
+    trellis_autocrop: bool,
+    #[serde(default = "default_true")]
+    trellis_force_opaque: bool,
+    #[serde(default = "default_trellis_atlas_padding")]
+    trellis_atlas_padding: u32,
     #[serde(default = "default_trellis_resolution")]
     trellis_resolution: u32,
     #[serde(default = "default_trellis_seed")]
@@ -182,7 +191,7 @@ struct HunyuanOptions {
     trellis_decimation_target: u32,
     #[serde(default = "default_trellis_texture_size")]
     trellis_texture_size: u32,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     trellis_remesh: bool,
     #[serde(default = "default_true")]
     trellis_export_webp: bool,
@@ -266,6 +275,20 @@ struct JobSummary {
     outputs: Vec<String>,
     failed_count: Option<u64>,
     total_count: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PresetAverage {
+    average_seconds: f64,
+    samples: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobHistoryResponse {
+    jobs: Vec<serde_json::Value>,
+    preset_averages: BTreeMap<String, PresetAverage>,
 }
 
 #[derive(Default)]
@@ -785,6 +808,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_trellis_preset() -> String {
+    "standard".to_string()
+}
+
+fn default_trellis_atlas_padding() -> u32 {
+    12
+}
+
 fn default_trellis_resolution() -> u32 {
     1024
 }
@@ -802,11 +833,11 @@ fn default_trellis_sparse_guidance() -> f32 {
 }
 
 fn default_trellis_sparse_rescale() -> f32 {
-    0.5
+    0.7
 }
 
 fn default_trellis_sparse_rescale_t() -> f32 {
-    3.0
+    5.0
 }
 
 fn default_trellis_shape_steps() -> u32 {
@@ -842,11 +873,11 @@ fn default_trellis_texture_rescale_t() -> f32 {
 }
 
 fn default_trellis_decimation_target() -> u32 {
-    5_000
+    100_000
 }
 
 fn default_trellis_texture_size() -> u32 {
-    1024
+    2048
 }
 
 fn default_hunyuan_options() -> HunyuanOptions {
@@ -883,7 +914,7 @@ fn default_hunyuan_options() -> HunyuanOptions {
         texture_view_size: 512,
         texture_steps: 15,
         texture_guidance: 3.0,
-        texture_size: 4096,
+        texture_size: 2048,
         texture_seed: 802344256,
         texture_seed_mode: "randomize".to_string(),
         unwrap_mesh: true,
@@ -891,6 +922,10 @@ fn default_hunyuan_options() -> HunyuanOptions {
         camera_elevations: "0, 0, 0, 0, 90, -90".to_string(),
         view_weights: "1, 0.1, 0.5, 0.1, 0.05, 0.05".to_string(),
         ortho_scale: 1.1,
+        trellis_preset: default_trellis_preset(),
+        trellis_autocrop: true,
+        trellis_force_opaque: true,
+        trellis_atlas_padding: default_trellis_atlas_padding(),
         trellis_resolution: default_trellis_resolution(),
         trellis_seed: default_trellis_seed(),
         trellis_seed_mode: default_randomize_seed_mode(),
@@ -908,7 +943,7 @@ fn default_hunyuan_options() -> HunyuanOptions {
         trellis_texture_rescale_t: default_trellis_texture_rescale_t(),
         trellis_decimation_target: default_trellis_decimation_target(),
         trellis_texture_size: default_trellis_texture_size(),
-        trellis_remesh: true,
+        trellis_remesh: false,
         trellis_export_webp: true,
     }
 }
@@ -920,21 +955,18 @@ fn apply_mesh_detail_preset(options: &mut HunyuanOptions) {
             options.octree_resolution = 256;
             options.num_chunks = 6000;
             options.max_faces = 5_000;
-            options.trellis_decimation_target = 5_000;
         }
         "medium" => {
             options.mesh_steps = 50;
             options.octree_resolution = 384;
             options.num_chunks = 8000;
             options.max_faces = 20_000;
-            options.trellis_decimation_target = 20_000;
         }
         "high" => {
             options.mesh_steps = 80;
             options.octree_resolution = 512;
             options.num_chunks = 12000;
             options.max_faces = 50_000;
-            options.trellis_decimation_target = 50_000;
         }
         "custom" => {}
         _ => {
@@ -943,10 +975,58 @@ fn apply_mesh_detail_preset(options: &mut HunyuanOptions) {
     }
 }
 
+fn apply_trellis_preset(options: &mut HunyuanOptions) {
+    match options.trellis_preset.as_str() {
+        "preview" => {
+            options.trellis_resolution = 512;
+            options.trellis_sparse_steps = 12;
+            options.trellis_shape_steps = 12;
+            options.trellis_texture_steps = 12;
+            options.trellis_texture_guidance = 3.0;
+            options.trellis_decimation_target = 20_000;
+            options.trellis_texture_size = 1024;
+            options.trellis_remesh = false;
+        }
+        "standard" => {
+            options.trellis_resolution = 1024;
+            options.trellis_sparse_steps = 12;
+            options.trellis_shape_steps = 12;
+            options.trellis_texture_steps = 12;
+            options.trellis_texture_guidance = 7.5;
+            options.trellis_decimation_target = 100_000;
+            options.trellis_texture_size = 2048;
+            options.trellis_remesh = false;
+        }
+        "quality" => {
+            options.trellis_resolution = 1024;
+            options.trellis_sparse_steps = 25;
+            options.trellis_shape_steps = 25;
+            options.trellis_texture_steps = 25;
+            options.trellis_texture_guidance = 7.5;
+            options.trellis_decimation_target = 200_000;
+            options.trellis_texture_size = 2048;
+            options.trellis_remesh = false;
+        }
+        "highpoly" => {
+            options.trellis_resolution = 1024;
+            options.trellis_sparse_steps = 25;
+            options.trellis_shape_steps = 25;
+            options.trellis_texture_steps = 25;
+            options.trellis_texture_guidance = 7.5;
+            options.trellis_decimation_target = 500_000;
+            options.trellis_texture_size = 4096;
+            options.trellis_remesh = false;
+        }
+        "custom" => {}
+        _ => options.trellis_preset = "custom".to_string(),
+    }
+}
+
 fn normalize_options_for_job(options: &mut HunyuanOptions) -> Result<(), String> {
     options.model_backend = normalize_model_backend(&options.model_backend);
     apply_mesh_detail_preset(options);
     if options.model_backend == "trellis2" {
+        apply_trellis_preset(options);
         options.mode = "meshTexture".to_string();
     }
     if options.output_dir.trim().is_empty() {
@@ -969,6 +1049,142 @@ fn jobs_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app_data_dir(app)?.join("jobs");
     fs::create_dir_all(&dir).map_err(|error| format!("Unable to create jobs folder: {error}"))?;
     Ok(dir)
+}
+
+#[tauri::command]
+fn list_job_history(app: AppHandle) -> Result<JobHistoryResponse, String> {
+    let history_dir = jobs_dir(&app)?.join("history");
+    if !history_dir.is_dir() {
+        return Ok(JobHistoryResponse {
+            jobs: Vec::new(),
+            preset_averages: BTreeMap::new(),
+        });
+    }
+
+    let mut jobs = Vec::new();
+    let mut samples: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    let entries = fs::read_dir(&history_dir)
+        .map_err(|error| format!("Unable to read job history: {error}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let backend = value
+            .get("backend")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let preset = value
+            .get("preset")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("custom");
+        let status = value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        if status == "done" {
+            if let Some(elapsed) = value
+                .get("elapsedSeconds")
+                .and_then(serde_json::Value::as_f64)
+            {
+                let completed_items = value
+                    .get("totalCount")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(1)
+                    .max(1) as f64;
+                samples
+                    .entry(format!("{backend}:{preset}"))
+                    .or_default()
+                    .push(elapsed / completed_items);
+            }
+        }
+        jobs.push(serde_json::json!({
+            "id": value.get("id").cloned().unwrap_or(serde_json::Value::Null),
+            "backend": backend,
+            "preset": preset,
+            "status": status,
+            "message": value.get("message").cloned().unwrap_or(serde_json::Value::Null),
+            "startedAt": value.get("startedAt").cloned().unwrap_or(serde_json::Value::Null),
+            "endedAt": value.get("endedAt").cloned().unwrap_or(serde_json::Value::Null),
+            "elapsedSeconds": value.get("elapsedSeconds").cloned().unwrap_or(serde_json::Value::Null),
+            "inputs": value.get("inputs").cloned().unwrap_or_else(|| serde_json::json!([])),
+            "outputs": value.get("outputs").cloned().unwrap_or_else(|| serde_json::json!([])),
+            "failedCount": value.get("failedCount").cloned().unwrap_or(serde_json::Value::Null),
+            "totalCount": value.get("totalCount").cloned().unwrap_or(serde_json::Value::Null),
+        }));
+    }
+    jobs.sort_by(|left, right| {
+        let left_started = left
+            .get("startedAt")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let right_started = right
+            .get("startedAt")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        right_started.cmp(left_started)
+    });
+    jobs.truncate(100);
+
+    let preset_averages = samples
+        .into_iter()
+        .filter_map(|(key, values)| {
+            if values.is_empty() {
+                return None;
+            }
+            let samples = values.len();
+            let average_seconds = values.iter().sum::<f64>() / samples as f64;
+            Some((
+                key,
+                PresetAverage {
+                    average_seconds,
+                    samples,
+                },
+            ))
+        })
+        .collect();
+    Ok(JobHistoryResponse {
+        jobs,
+        preset_averages,
+    })
+}
+
+fn mark_job_manifest_status(
+    app: &AppHandle,
+    job_id: &str,
+    status: &str,
+    message: &str,
+) -> Result<(), String> {
+    let manifest_path = jobs_dir(app)?
+        .join("history")
+        .join(format!("{job_id}.json"));
+    if !manifest_path.is_file() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("Unable to read job manifest: {error}"))?;
+    let mut manifest = serde_json::from_str::<serde_json::Value>(&raw)
+        .map_err(|error| format!("Unable to parse job manifest: {error}"))?;
+    if let Some(object) = manifest.as_object_mut() {
+        object.insert(
+            "status".to_string(),
+            serde_json::Value::String(status.to_string()),
+        );
+        object.insert(
+            "message".to_string(),
+            serde_json::Value::String(message.to_string()),
+        );
+    }
+    let encoded = serde_json::to_string_pretty(&manifest)
+        .map_err(|error| format!("Unable to serialize job manifest: {error}"))?;
+    fs::write(&manifest_path, encoded)
+        .map_err(|error| format!("Unable to update job manifest: {error}"))
 }
 
 fn worker_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1915,8 +2131,12 @@ fn start_generation_job(
 }
 
 #[tauri::command]
-fn cancel_active_job(active_jobs: State<'_, ActiveJobState>) -> Result<(), String> {
+fn cancel_active_job(app: AppHandle, active_jobs: State<'_, ActiveJobState>) -> Result<(), String> {
+    let job_id = active_jobs.active_job_summary()?.map(|summary| summary.id);
     let pid = active_jobs.request_cancel()?;
+    if let Some(job_id) = job_id {
+        let _ = mark_job_manifest_status(&app, &job_id, "canceled", "Job canceled.");
+    }
     kill_process_tree(pid)
 }
 
@@ -2215,6 +2435,7 @@ fn agent_openapi(port: u16) -> serde_json::Value {
         "paths": {
             "/health": { "get": { "summary": "Check API status" } },
             "/status": { "get": { "summary": "Check active job status" } },
+            "/history": { "get": { "summary": "List retained job history and measured preset averages" } },
             "/runtime": { "get": { "summary": "Check local runtime readiness" } },
             "/vram": { "get": { "summary": "Check NVIDIA VRAM" } },
             "/prepare": { "post": { "summary": "Prepare the standalone runtime" } },
@@ -2284,18 +2505,30 @@ fn agent_options_from_request(
     let base = merged
         .as_object_mut()
         .ok_or_else(|| "Unable to merge default options.".to_string())?;
-    let mesh_numbers_overridden = [
-        "meshSteps",
-        "octreeResolution",
-        "numChunks",
-        "maxFaces",
-        "trellisDecimationTarget",
-    ]
-    .iter()
-    .any(|key| overrides.contains_key(*key));
+    let mesh_numbers_overridden = ["meshSteps", "octreeResolution", "numChunks", "maxFaces"]
+        .iter()
+        .any(|key| overrides.contains_key(*key));
     if mesh_numbers_overridden && !overrides.contains_key("meshDetail") {
         base.insert(
             "meshDetail".to_string(),
+            serde_json::Value::String("custom".to_string()),
+        );
+    }
+    let trellis_settings_overridden = [
+        "trellisResolution",
+        "trellisSparseSteps",
+        "trellisShapeSteps",
+        "trellisTextureSteps",
+        "trellisTextureGuidance",
+        "trellisDecimationTarget",
+        "trellisTextureSize",
+        "trellisRemesh",
+    ]
+    .iter()
+    .any(|key| overrides.contains_key(*key));
+    if trellis_settings_overridden && !overrides.contains_key("trellisPreset") {
+        base.insert(
+            "trellisPreset".to_string(),
             serde_json::Value::String("custom".to_string()),
         );
     }
@@ -2325,6 +2558,9 @@ fn handle_agent_route(
         ("GET", "/status") => {
             let status = agent_status_from(agent_state, active_jobs)?;
             serde_json::to_value(status).map_err(|error| error.to_string())
+        }
+        ("GET", "/history") => {
+            serde_json::to_value(list_job_history(app.clone())?).map_err(|error| error.to_string())
         }
         ("GET", "/runtime") => {
             let runtime_profile = query_value(request.query.as_deref(), "runtimeProfile");
@@ -2742,6 +2978,7 @@ pub fn run() {
             check_runtime,
             get_agent_server_status,
             get_vram_status,
+            list_job_history,
             open_containing_folder,
             open_output_folder,
             open_path,
