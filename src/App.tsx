@@ -27,6 +27,7 @@ import {
   XCircle
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ObjPreviewViewer } from "./ObjPreviewViewer";
 import { parseVoxelSidecar, VoxelDssViewer, type VoxelSidecar } from "./VoxelDssViewer";
 
 type PipelineMode = "meshTexture" | "meshOnly" | "textureOnly";
@@ -456,7 +457,8 @@ const defaultOptions: ImageTo3DOptions = {
 const isTauriRuntime = () => "__TAURI_INTERNALS__" in window || "__TAURI__" in window;
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 const isModelFile = (path: string) => /\.(glb|gltf|obj|ply)$/i.test(path);
-const isPreviewableModelFile = (path: string) => /\.(glb|gltf)$/i.test(path);
+const isPreviewableModelFile = (path: string) => /\.(glb|gltf|obj)$/i.test(path);
+const isObjModelFile = (path: string) => /\.obj$/i.test(path);
 const isPreviewableImage = (path: string) => /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(path);
 const isTemporaryJobOutput = (path: string) => /[\\/]jobs[\\/]/i.test(path);
 
@@ -933,6 +935,7 @@ function App() {
   const [previewAppearance, setPreviewAppearance] = useState<PreviewAppearance>("textured");
   const [previewTextureStatus, setPreviewTextureStatus] = useState<PreviewTextureStatus | null>(null);
   const [previewImages, setPreviewImages] = useState<PreviewImages>({});
+  const [modelPreviewError, setModelPreviewError] = useState<string | null>(null);
   const [voxelSidecar, setVoxelSidecar] = useState<VoxelSidecar | null>(null);
   const [voxelPreviewError, setVoxelPreviewError] = useState<string | null>(null);
   const [dssPreviewEnabled, setDssPreviewEnabled] = useState(false);
@@ -984,7 +987,7 @@ function App() {
     ? fileName(selectedModel)
     : busy
       ? "The mesh preview appears before texturing finishes"
-      : "Drop a GLB to preview";
+      : "Drop a GLB or OBJ to preview";
   const bindModelViewer = useCallback((element: HTMLElement | null) => {
     modelViewerCleanupRef.current?.();
     modelViewerCleanupRef.current = null;
@@ -1193,6 +1196,7 @@ function App() {
       previewMaterialSnapshotsRef.current = [];
       setPreviewAppearance("textured");
       setPreviewTextureStatus(null);
+      setModelPreviewError(null);
       setHeadline(`Previewing ${fileName(path)}`);
       if (source === "dropped") {
         pushLog(`Previewing dropped model: ${path}`);
@@ -1205,14 +1209,12 @@ function App() {
     async (paths: string[]) => {
       if (!paths.length) return;
       const previewableModels = paths.filter(isPreviewableModelFile);
-      const inputPaths = paths.filter((path) => !isPreviewableModelFile(path));
 
       if (previewableModels.length > 0) {
         previewModel(previewableModels[0], "dropped");
+        return;
       }
-      if (inputPaths.length > 0) {
-        await addInputs(inputPaths);
-      }
+      await addInputs(paths);
     },
     [addInputs, previewModel]
   );
@@ -1545,6 +1547,8 @@ function App() {
     setQueue([]);
     setSelectedPath(null);
     setPreviewModelPath(null);
+    setPreviewTextureStatus(null);
+    setModelPreviewError(null);
     setPreviewImages({});
     setHeadline("Prepare runtime or drop files");
   }, []);
@@ -2475,7 +2479,7 @@ function App() {
               <div className="input-panel-copy">
                 <Download size={24} />
                 <div>
-                  <h3>Drop images, folders, or GLBs</h3>
+                  <h3>Drop images, folders, GLBs, or OBJs</h3>
                   <p>
                     {selectedItem
                       ? fileName(selectedItem.path)
@@ -2506,6 +2510,7 @@ function App() {
                 <div className="preview-title">
                   <strong>3D Preview</strong>
                   <small>{previewHint}</small>
+                  {selectedModel ? <small>Drop another GLB or OBJ to replace this preview</small> : null}
                   {selectedModel && previewTextureStatus ? (
                     <small
                       className={
@@ -2516,7 +2521,9 @@ function App() {
                     >
                       {previewTextureStatus.textureCount > 0
                         ? `${previewTextureStatus.textureCount} texture${previewTextureStatus.textureCount === 1 ? "" : "s"} detected`
-                        : "No embedded textures detected"}
+                        : isObjModelFile(selectedModel)
+                          ? "No OBJ material textures detected"
+                          : "No embedded textures detected"}
                     </small>
                   ) : null}
                 </div>
@@ -2526,7 +2533,7 @@ function App() {
                       className={`secondary preview-toggle ${previewAppearance === "textured" ? "active" : ""}`}
                       disabled={!modelUrl || previewTextureStatus?.textureCount === 0}
                       onClick={() => selectPreviewAppearance("textured")}
-                      title="Show the GLB's embedded material textures"
+                      title="Show the model's material textures"
                     >
                       <Image size={15} />
                       Textured
@@ -2555,6 +2562,15 @@ function App() {
               <div className="model-frame">
                 {showDssPreview && voxelSidecar ? (
                   <VoxelDssViewer sidecar={voxelSidecar} autoRotate={!busy} />
+                ) : modelUrl && selectedModel && isObjModelFile(selectedModel) ? (
+                  <ObjPreviewViewer
+                    key={modelUrl}
+                    modelUrl={modelUrl}
+                    autoRotate={!busy}
+                    appearance={previewAppearance}
+                    onTextureStatus={setPreviewTextureStatus}
+                    onError={setModelPreviewError}
+                  />
                 ) : modelUrl ? (
                   <model-viewer
                     key={modelUrl}
@@ -2570,12 +2586,14 @@ function App() {
                 ) : (
                   <div className="preview-empty">
                     <Layers3 size={30} />
-                    {busy ? "Generating preview" : "Drop a GLB here"}
+                    {busy ? "Generating preview" : "Drop a GLB or OBJ here"}
                   </div>
                 )}
               </div>
-              {previewImages.error || voxelPreviewError ? (
-                <small className="preview-error">{previewImages.error ?? voxelPreviewError}</small>
+              {previewImages.error || voxelPreviewError || modelPreviewError ? (
+                <small className="preview-error">
+                  {previewImages.error ?? voxelPreviewError ?? modelPreviewError}
+                </small>
               ) : null}
             </section>
           </div>

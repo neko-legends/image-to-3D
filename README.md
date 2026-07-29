@@ -35,8 +35,16 @@ Use the app like a normal desktop tool.
 
    ![One-time setup dialog for choosing a model, CUDA GPU, and PyTorch runtime](assets/first-run-setup.png)
 
-3. Add an image or a folder of images. You can also drop a `.glb` or `.gltf`
-   file into the window to preview it without starting a generation job.
+3. Add an image or a folder of images. You can also drop a `.glb`, `.gltf`, or
+   `.obj` file into the window to preview it without starting a generation job.
+   Dropping another model replaces the current preview.
+
+   A `.glb` can contain its materials and texture images inside the single GLB
+   file, so an adjacent JPG is not required when the textures are embedded.
+   OBJ uses separate sidecar files: keep its `.mtl` and referenced JPG/PNG
+   textures beside the `.obj`. The app loads the matching MTL and base-color
+   texture automatically and lets you switch the preview between `Textured`
+   and `Clay`.
 
 4. Pick the CUDA GPU and PyTorch runtime in the Runtime panel if you have more
    than one NVIDIA GPU.
