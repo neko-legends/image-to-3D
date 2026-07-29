@@ -107,6 +107,27 @@ Use the app like a normal desktop tool.
 8. Generated GLBs go into an `output` folder beside the running app by default.
    If you choose a different output folder, the app remembers it.
 
+### Hunyuan performance and VRAM guidance
+
+`View resolution` is the size of every camera image processed by the Hunyuan
+texture model (six views by default). It is separate from `Final texture`, which
+controls the exported texture atlas. Increasing view resolution from 512 to
+1024 doubles both dimensions, so the texture model processes four times as many
+pixels and can take substantially more time and VRAM.
+
+Start with:
+
+- `View resolution`: 512
+- `Final texture`: 2048
+- `Low poly`: about 5k faces
+
+As one RTX 5090 / CUDA 12.8 reference run, Hunyuan shape generation used about
+11 GB of VRAM and geometry generation plus reduction took roughly 30 seconds.
+The 512 texture-view stage used about 9.6 GB of VRAM. The complete job took
+2m 04s, including 36.2s for texture generation. Treat these as observations,
+not requirements or guarantees; GPU model, drivers, input, face target, texture
+steps, and view count all affect memory use and runtime.
+
 The app keeps loaded models warm after generation for faster follow-up jobs. Use
 `Unload` in the Runtime panel when you want to release GPU memory.
 

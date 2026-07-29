@@ -176,6 +176,7 @@ type WorkerEvent = {
     | "stage_done"
     | "stage_timing"
     | "mesh_ready"
+    | "texture_ready"
     | "image_start"
     | "image_done"
     | "image_error"
@@ -203,8 +204,9 @@ type PreviewImages = {
 };
 
 const APP_VERSION = "v26.7.29";
-const SETTINGS_STORAGE_KEY = "imageTo3D.settings.v2";
-const PREVIOUS_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v1";
+const SETTINGS_STORAGE_KEY = "imageTo3D.settings.v3";
+const PREVIOUS_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v2";
+const OLDER_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v1";
 const LEGACY_SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v3";
 const OLDEST_SETTINGS_STORAGE_KEY = "imageToHunyuan3D.settings.v2";
 const AGENT_STORAGE_KEY = "imageTo3D.agentControlEnabled.v1";
@@ -499,11 +501,18 @@ function loadSavedOptions(): ImageTo3DOptions {
   try {
     const saved = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
     const previousSaved = saved === null ? window.localStorage.getItem(PREVIOUS_SETTINGS_STORAGE_KEY) : null;
-    const savedFromPreviousSettingsKey = saved === null && previousSaved !== null;
-    const savedFromLegacyKey = saved === null && previousSaved === null;
+    const olderSaved =
+      saved === null && previousSaved === null
+        ? window.localStorage.getItem(OLDER_SETTINGS_STORAGE_KEY)
+        : null;
+    const savedFromOlderSettingsKey =
+      saved === null && previousSaved === null && olderSaved !== null;
+    const savedFromLegacyKey =
+      saved === null && previousSaved === null && olderSaved === null;
     const rawSaved =
       saved ??
       previousSaved ??
+      olderSaved ??
       window.localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY) ??
       window.localStorage.getItem(OLDEST_SETTINGS_STORAGE_KEY);
     if (!rawSaved) return defaultOptions;
@@ -601,7 +610,7 @@ function loadSavedOptions(): ImageTo3DOptions {
     };
     let migratedOptions = loadedOptions;
     if (
-      savedFromPreviousSettingsKey &&
+      savedFromOlderSettingsKey &&
       (parsed.meshDetail === undefined || parsed.meshDetail === "medium") &&
       meshSteps === 50 &&
       octreeResolution === 384 &&
@@ -610,6 +619,9 @@ function loadSavedOptions(): ImageTo3DOptions {
       trellisDecimationTarget === 50000
     ) {
       migratedOptions = applyGeometryPreset(migratedOptions, "low");
+    }
+    if (saved === null && parsed.textureSize === 4096) {
+      migratedOptions = { ...migratedOptions, textureSize: defaultOptions.textureSize };
     }
     if (parsed.trellisPreset === undefined) {
       migratedOptions = applyTrellisPreset(migratedOptions, defaultOptions.trellisPreset);
@@ -803,6 +815,7 @@ function App() {
   const setupPromptSeenRef = useRef(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [previewModelPath, setPreviewModelPath] = useState<string | null>(null);
+  const [previewModelRevision, setPreviewModelRevision] = useState(0);
   const [previewImages, setPreviewImages] = useState<PreviewImages>({});
   const [voxelSidecar, setVoxelSidecar] = useState<VoxelSidecar | null>(null);
   const [voxelPreviewError, setVoxelPreviewError] = useState<string | null>(null);
@@ -843,8 +856,11 @@ function App() {
     [previewModelPath, selectedItem]
   );
   const modelUrl = useMemo(
-    () => (selectedModel && isTauriRuntime() ? convertFileSrc(selectedModel) : ""),
-    [selectedModel]
+    () =>
+      selectedModel && isTauriRuntime()
+        ? `${convertFileSrc(selectedModel)}?preview=${previewModelRevision}`
+        : "",
+    [previewModelRevision, selectedModel]
   );
   const previewHint = selectedModel
     ? fileName(selectedModel)
@@ -970,6 +986,7 @@ function App() {
   const previewModel = useCallback(
     (path: string, source: "dropped" | "selected" | "generated" = "selected") => {
       setPreviewModelPath(path);
+      setPreviewModelRevision((current) => current + 1);
       setHeadline(`Previewing ${fileName(path)}`);
       if (source === "dropped") {
         pushLog(`Previewing dropped model: ${path}`);
@@ -1114,6 +1131,21 @@ function App() {
           current.map((item) =>
             item.path === payload.path
               ? { ...item, status: "running", message: "Mesh ready · generating texture" }
+              : item
+          )
+        );
+        setSelectedPath(payload.path);
+      }
+      if (payload.type === "texture_ready" && payload.path) {
+        const texturedModel = choosePreviewModel(parseOutputPaths(payload.output, payload.outputs));
+        if (texturedModel) {
+          previewModel(texturedModel, "generated");
+        }
+        setHeadline(workerMessage ?? `Textured GLB ready for ${fileName(payload.path)}`);
+        setQueue((current) =>
+          current.map((item) =>
+            item.path === payload.path
+              ? { ...item, status: "running", message: "Texture ready · loading final GLB" }
               : item
           )
         );

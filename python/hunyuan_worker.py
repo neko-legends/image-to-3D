@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import gc
 import json
 import os
@@ -9,6 +10,7 @@ import random
 import re
 import shutil
 import subprocess
+import struct
 import sys
 import time
 import traceback
@@ -2468,6 +2470,74 @@ def find_existing_output(*paths: Path) -> list[str]:
     return output
 
 
+def repair_glb_embedded_image_mime_types(path: Path) -> int:
+    """Correct embedded image data-URI MIME types without adding dependencies."""
+    data = path.read_bytes()
+    if len(data) < 12:
+        return 0
+    magic, version, declared_length = struct.unpack_from("<4sII", data, 0)
+    if magic != b"glTF" or version != 2 or declared_length != len(data):
+        return 0
+
+    chunks: list[tuple[int, bytes]] = []
+    json_chunk_index: int | None = None
+    offset = 12
+    while offset + 8 <= len(data):
+        chunk_length, chunk_type = struct.unpack_from("<II", data, offset)
+        offset += 8
+        chunk = data[offset : offset + chunk_length]
+        if len(chunk) != chunk_length:
+            return 0
+        if chunk_type == 0x4E4F534A:
+            json_chunk_index = len(chunks)
+        chunks.append((chunk_type, chunk))
+        offset += chunk_length
+    if offset != len(data) or json_chunk_index is None:
+        return 0
+
+    json_chunk = chunks[json_chunk_index][1].rstrip(b" \t\r\n\0")
+    document = json.loads(json_chunk.decode("utf-8"))
+    changed = 0
+    for image in document.get("images") or []:
+        uri = image.get("uri")
+        if not isinstance(uri, str) or not uri.startswith("data:") or ";base64," not in uri:
+            continue
+        header, encoded = uri.split(",", 1)
+        sample_text = encoded[:32]
+        sample_text += "=" * (-len(sample_text) % 4)
+        try:
+            sample = base64.b64decode(sample_text)
+        except Exception:
+            continue
+        actual_mime = None
+        if sample.startswith(b"\xff\xd8\xff"):
+            actual_mime = "image/jpeg"
+        elif sample.startswith(b"\x89PNG\r\n\x1a\n"):
+            actual_mime = "image/png"
+        elif sample.startswith(b"RIFF") and sample[8:12] == b"WEBP":
+            actual_mime = "image/webp"
+        if actual_mime is None or header == f"data:{actual_mime};base64":
+            continue
+        image["uri"] = f"data:{actual_mime};base64,{encoded}"
+        changed += 1
+
+    if changed == 0:
+        return 0
+
+    updated_json = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    updated_json += b" " * (-len(updated_json) % 4)
+    chunks[json_chunk_index] = (0x4E4F534A, updated_json)
+    total_length = 12 + sum(8 + len(chunk) for _, chunk in chunks)
+    output = bytearray(struct.pack("<4sII", b"glTF", 2, total_length))
+    for chunk_type, chunk in chunks:
+        output.extend(struct.pack("<II", len(chunk), chunk_type))
+        output.extend(chunk)
+    temporary = path.with_name(f"{path.name}.mime.tmp")
+    temporary.write_bytes(output)
+    temporary.replace(path)
+    return changed
+
+
 def cleanup_job_scratch(jobs_dir: Path, keep: Path | None = None) -> None:
     if not jobs_dir.is_dir():
         return
@@ -2954,6 +3024,21 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                         if final_mesh_path.exists() and overwrite:
                             final_mesh_path.unlink()
                         shutil.move(str(result_path), str(final_mesh_path))
+                    if final_mesh_path.is_file():
+                        repaired_images = repair_glb_embedded_image_mime_types(final_mesh_path)
+                        if repaired_images:
+                            emit(
+                                "setup",
+                                f"Corrected {repaired_images} embedded texture MIME type"
+                                f"{'s' if repaired_images != 1 else ''} for GLB preview compatibility.",
+                                path=str(image_path),
+                            )
+                        emit(
+                            "texture_ready",
+                            f"Textured GLB ready for {image_path.name}.",
+                            path=str(image_path),
+                            output=str(final_mesh_path.resolve()),
+                        )
                     outputs.extend(find_existing_output(final_mesh_path, output_obj, output_obj.with_suffix(".jpg")))
 
                 if voxel_sidecar and final_mesh_path.exists():
