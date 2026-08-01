@@ -70,7 +70,7 @@ if (Test-Path -LiteralPath $portableDir) {
 }
 
 New-Item -ItemType Directory -Force -Path $portableDir, $portableDataDir, $portablePythonDir, $installerDir | Out-Null
-foreach ($name in "jobs", "models", "outputs", "python", "runtime") {
+foreach ($name in "jobs", "outputs", "python", "runtime") {
   New-Item -ItemType Directory -Force -Path (Join-Path $portableDataDir $name) | Out-Null
 }
 Get-ChildItem -Path $installerDir -Filter "*.exe" -File -ErrorAction SilentlyContinue | Remove-Item -Force

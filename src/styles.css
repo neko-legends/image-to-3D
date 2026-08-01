@@ -314,6 +314,8 @@ select:disabled {
   gap: 14px;
   min-width: 0;
   min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 30px;
 }
 
@@ -400,6 +402,17 @@ select:disabled {
 
 .setup-recommendation {
   margin: 12px 0 0;
+}
+
+.setup-model-path {
+  margin-top: 12px;
+}
+
+.setup-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: rgba(232, 230, 227, 0.62);
 }
 
 .mini-action {
@@ -526,16 +539,19 @@ button:disabled {
 
 .media-grid {
   display: grid;
-  grid-template-columns: 310px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr);
   gap: 14px;
   align-items: start;
 }
 
 .input-panel {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-column: 2;
+  grid-row: 1;
+  grid-template-rows: auto minmax(180px, 1fr) auto;
   gap: 10px;
-  min-height: 176px;
+  height: 100%;
+  min-height: 0;
   border: 1px dashed rgba(255, 151, 51, 0.52);
   border-radius: 8px;
   color: #ff9d37;
@@ -586,12 +602,14 @@ button:disabled {
 
 .input-thumb img {
   max-width: 100%;
-  max-height: 82px;
+  max-height: 360px;
   object-fit: contain;
 }
 
 .preview-panel {
-  min-height: 368px;
+  grid-column: 1;
+  grid-row: 1;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid rgba(255, 145, 47, 0.15);
   border-radius: 8px;
@@ -666,37 +684,37 @@ button:disabled {
 }
 
 .model-frame {
-  height: 314px;
-  overflow: hidden;
-}
-
-.model-frame model-viewer {
   width: 100%;
-  height: 314px;
-  background: radial-gradient(circle at 50% 35%, rgba(43, 212, 191, 0.1), transparent 48%), #070807;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  overflow: hidden;
 }
 
 .dss-viewer,
 .dss-canvas,
+.gltf-preview-viewer,
+.gltf-preview-canvas,
 .obj-preview-viewer,
 .obj-preview-canvas {
   width: 100%;
-  height: 314px;
+  height: 100%;
 }
 
 .dss-viewer,
+.gltf-preview-viewer,
 .obj-preview-viewer {
   background: radial-gradient(circle at 50% 35%, rgba(43, 212, 191, 0.1), transparent 48%), #070807;
 }
 
 .dss-canvas,
+.gltf-preview-canvas,
 .obj-preview-canvas {
   display: block;
 }
 
 .preview-empty {
   width: 100%;
-  height: 314px;
+  height: 100%;
   border: 0;
   color: #a99d92;
   background: transparent;

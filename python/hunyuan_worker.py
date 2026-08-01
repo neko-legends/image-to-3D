@@ -62,6 +62,173 @@ HUNYUAN_ENV_MARKER = ".i3d-hunyuan-env-v2-ready"
 TRELLIS_ENV_MARKER = ".i3d-trellis-env-v3-ready"
 WHEEL_MARKER = ".ih3d-texture-wheels-v1-ready"
 VOXEL_DSS_SIDECAR_MAX_CELLS = 300_000
+
+
+PBR_CONVERT_UTILS_SOURCE = base64.b64decode(
+    "aW1wb3J0IHRyaW1lc2gKaW1wb3J0IHB5Z2x0ZmxpYgppbXBvcnQgbnVtcHkgYXMgbnAKZnJvbSBQ"
+    "SUwgaW1wb3J0IEltYWdlCmltcG9ydCBiYXNlNjQKaW1wb3J0IGlvCgoKZGVmIGNvbWJpbmVfbWV0"
+    "YWxsaWNfcm91Z2huZXNzKG1ldGFsbGljX3BhdGgsIHJvdWdobmVzc19wYXRoLCBvdXRwdXRfcGF0"
+    "aCk6CiAgICAiIiIKICAgIOWwhm1ldGFsbGlj5ZKMcm91Z2huZXNz6LS05Zu+5ZCI5bm25Li65LiA"
+    "5byg6LS05Zu+CiAgICBHTELmoLzlvI/opoHmsYJtZXRhbGxpY+WcqELpgJrpgZPvvIxyb3VnaG5l"
+    "c3PlnKhH6YCa6YGTCiAgICAiIiIKICAgICMg5Yqg6L296LS05Zu+CiAgICBtZXRhbGxpY19pbWcg"
+    "PSBJbWFnZS5vcGVuKG1ldGFsbGljX3BhdGgpLmNvbnZlcnQoIkwiKSAgIyDovazkuLrngbDluqYK"
+    "ICAgIHJvdWdobmVzc19pbWcgPSBJbWFnZS5vcGVuKHJvdWdobmVzc19wYXRoKS5jb252ZXJ0KCJM"
+    "IikgICMg6L2s5Li654Gw5bqmCgogICAgIyDnoa7kv53lsLrlr7jkuIDoh7QKICAgIGlmIG1ldGFs"
+    "bGljX2ltZy5zaXplICE9IHJvdWdobmVzc19pbWcuc2l6ZToKICAgICAgICByb3VnaG5lc3NfaW1n"
+    "ID0gcm91Z2huZXNzX2ltZy5yZXNpemUobWV0YWxsaWNfaW1nLnNpemUpCgogICAgIyDliJvlu7pS"
+    "R0Llm77lg48KICAgIHdpZHRoLCBoZWlnaHQgPSBtZXRhbGxpY19pbWcuc2l6ZQogICAgY29tYmlu"
+    "ZWQgPSBJbWFnZS5uZXcoIlJHQiIsICh3aWR0aCwgaGVpZ2h0KSkKCiAgICAjIOi9rOS4um51bXB5"
+    "5pWw57uE5L6/5LqO5pON5L2cCiAgICBtZXRhbGxpY19hcnJheSA9IG5wLmFycmF5KG1ldGFsbGlj"
+    "X2ltZykKICAgIHJvdWdobmVzc19hcnJheSA9IG5wLmFycmF5KHJvdWdobmVzc19pbWcpCgogICAg"
+    "IyDliJvlu7rlkIjlubbnmoTmlbDnu4QgKFIsIEcsIEIpID0gKEFPLCBSb3VnaG5lc3MsIE1ldGFs"
+    "bGljKQogICAgY29tYmluZWRfYXJyYXkgPSBucC56ZXJvcygoaGVpZ2h0LCB3aWR0aCwgMyksIGR0"
+    "eXBlPW5wLnVpbnQ4KQogICAgY29tYmluZWRfYXJyYXlbOiwgOiwgMF0gPSAyNTUgICMgUumAmumB"
+    "k++8mkFPICjlpoLmnpzmsqHmnIlBT+i0tOWbvu+8jOiuvuS4uueZveiJsikKICAgIGNvbWJpbmVk"
+    "X2FycmF5WzosIDosIDFdID0gcm91Z2huZXNzX2FycmF5ICAjIEfpgJrpgZPvvJpSb3VnaG5lc3MK"
+    "ICAgIGNvbWJpbmVkX2FycmF5WzosIDosIDJdID0gbWV0YWxsaWNfYXJyYXkgICMgQumAmumBk++8"
+    "mk1ldGFsbGljCgogICAgIyDovazlm55QSUzlm77lg4/lubbkv53lrZgKICAgIGNvbWJpbmVkID0g"
+    "SW1hZ2UuZnJvbWFycmF5KGNvbWJpbmVkX2FycmF5KQogICAgY29tYmluZWQuc2F2ZShvdXRwdXRf"
+    "cGF0aCkKICAgIHJldHVybiBvdXRwdXRfcGF0aAoKCmRlZiBfaW1hZ2VfbWltZV9hbmRfYnl0ZXMo"
+    "aW1hZ2VfcGF0aCk6CiAgICAiIiJSZXR1cm4gKG1pbWUsIGJ5dGVzKSBmb3IgYW4gaW1hZ2UsIHJl"
+    "LWVuY29kaW5nIHRvIEpQRUcvUE5HL1dFQlAgYXMgbmVlZGVkLiIiIgogICAgd2l0aCBvcGVuKGlt"
+    "YWdlX3BhdGgsICJyYiIpIGFzIGY6CiAgICAgICAgZGF0YSA9IGYucmVhZCgpCiAgICBpZiBkYXRh"
+    "LnN0YXJ0c3dpdGgoYiJceGZmXHhkOFx4ZmYiKToKICAgICAgICByZXR1cm4gImltYWdlL2pwZWci"
+    "LCBkYXRhCiAgICBpZiBkYXRhLnN0YXJ0c3dpdGgoYiJceDg5UE5HXHJcblx4MWFcbiIpOgogICAg"
+    "ICAgIHJldHVybiAiaW1hZ2UvcG5nIiwgZGF0YQogICAgaWYgZGF0YS5zdGFydHN3aXRoKGIiUklG"
+    "RiIpIGFuZCBkYXRhWzg6MTJdID09IGIiV0VCUCI6CiAgICAgICAgcmV0dXJuICJpbWFnZS93ZWJw"
+    "IiwgZGF0YQogICAgIyBVbmtub3duIGZvcm1hdDogcmUtZW5jb2RlIHRvIFBORyB2aWEgUElMIHNv"
+    "IHRoZSBNSU1FIGlzIGFsd2F5cyBhY2N1cmF0ZS4KICAgIGltZyA9IEltYWdlLm9wZW4oaW8uQnl0"
+    "ZXNJTyhkYXRhKSkuY29udmVydCgiUkdCQSIpCiAgICBidWYgPSBpby5CeXRlc0lPKCkKICAgIGlt"
+    "Zy5zYXZlKGJ1ZiwgZm9ybWF0PSJQTkciKQogICAgcmV0dXJuICJpbWFnZS9wbmciLCBidWYuZ2V0"
+    "dmFsdWUoKQoKCmRlZiBfZ2xiX2VtYmVkX2ltYWdlKGdsdGYsIGJpbmFyeSwgaW1hZ2VfcGF0aCk6"
+    "CiAgICAiIiJBcHBlbmQgaW1hZ2UgYnl0ZXMgdG8gdGhlIEdMQiBiaW5hcnkgYnVmZmVyIGFuZCBy"
+    "ZXR1cm4gdGhlIGltYWdlIGluZGV4LgoKICAgIFRleHR1cmVzIGFyZSBlbWJlZGRlZCBhcyBwcm9w"
+    "ZXIgR0xCIGJpbmFyeSBidWZmZXJWaWV3IGVudHJpZXMgKHRoZSBzdGFuZGFyZAogICAgd2F5KSBy"
+    "YXRoZXIgdGhhbiBiYXNlNjQgZGF0YS1VUklzIGluIHRoZSBKU09OIGNodW5rLiBEYXRhLVVSSSB0"
+    "ZXh0dXJlcyBhcmUKICAgIGdvdmVybmVkIGJ5IHRoZSBwYWdlIENvbnRlbnQtU2VjdXJpdHktUG9s"
+    "aWN5IGNvbm5lY3Qtc3JjIGFuZCBnZXQgc2lsZW50bHkKICAgIGRyb3BwZWQgaW4gbG9ja2VkLWRv"
+    "d24gd2Vidmlld3MsIGxlYXZpbmcgdGhlIG1vZGVsIHVudGV4dHVyZWQuIEJpbmFyeQogICAgYnVm"
+    "ZmVyVmlldyB0ZXh0dXJlcyBsb2FkIHRocm91Z2ggdGhlIEdMQiBsb2FkZXIgYW5kIHJlbmRlciBl"
+    "dmVyeXdoZXJlLgogICAgIiIiCiAgICBtaW1lLCBkYXRhID0gX2ltYWdlX21pbWVfYW5kX2J5dGVz"
+    "KGltYWdlX3BhdGgpCgogICAgIyBUaGUgR0xCIGJpbmFyeSBibG9iIGxpdmVzIGluIGJ1ZmZlciAw"
+    "OyBncm93IGl0IHdpdGggNC1ieXRlIGFsaWdubWVudC4KICAgIHBhZCA9ICg0IC0gKGxlbihiaW5h"
+    "cnkpICUgNCkpICUgNAogICAgaWYgcGFkOgogICAgICAgIGJpbmFyeSArPSBiIlx4MDAiICogcGFk"
+    "CiAgICBvZmZzZXQgPSBsZW4oYmluYXJ5KQogICAgYmluYXJ5ICs9IGRhdGEKICAgIHBhZCA9ICg0"
+    "IC0gKGxlbihkYXRhKSAlIDQpKSAlIDQKICAgIGlmIHBhZDoKICAgICAgICBiaW5hcnkgKz0gYiJc"
+    "eDAwIiAqIHBhZAoKICAgIGlmIG5vdCBnbHRmLmJ1ZmZlcnM6CiAgICAgICAgZ2x0Zi5idWZmZXJz"
+    "ID0gW3B5Z2x0ZmxpYi5CdWZmZXIoYnl0ZUxlbmd0aD0wKV0KICAgIGdsdGYuYnVmZmVyc1swXS5i"
+    "eXRlTGVuZ3RoID0gbGVuKGJpbmFyeSkKCiAgICBidWZmZXJfdmlldyA9IHB5Z2x0ZmxpYi5CdWZm"
+    "ZXJWaWV3KAogICAgICAgIGJ1ZmZlcj0wLAogICAgICAgIGJ5dGVPZmZzZXQ9b2Zmc2V0LAogICAg"
+    "ICAgIGJ5dGVMZW5ndGg9bGVuKGRhdGEpLAogICAgKQogICAgZ2x0Zi5idWZmZXJWaWV3cy5hcHBl"
+    "bmQoYnVmZmVyX3ZpZXcpCiAgICBidl9pbmRleCA9IGxlbihnbHRmLmJ1ZmZlclZpZXdzKSAtIDEK"
+    "CiAgICBpbWFnZSA9IHB5Z2x0ZmxpYi5JbWFnZShidWZmZXJWaWV3PWJ2X2luZGV4LCBtaW1lVHlw"
+    "ZT1taW1lKQogICAgZ2x0Zi5pbWFnZXMuYXBwZW5kKGltYWdlKQogICAgcmV0dXJuIGxlbihnbHRm"
+    "LmltYWdlcykgLSAxCgoKZGVmIGNyZWF0ZV9nbGJfd2l0aF9wYnJfbWF0ZXJpYWxzKG9ial9wYXRo"
+    "LCB0ZXh0dXJlc19kaWN0LCBvdXRwdXRfcGF0aCk6CiAgICAiIiJDcmVhdGUgYSBHTEIgd2l0aCBm"
+    "dWxsIFBCUiBtYXRlcmlhbHMuCgogICAgVGV4dHVyZXMgYXJlIGVtYmVkZGVkIGFzIHN0YW5kYXJk"
+    "IEdMQiBiaW5hcnkgYnVmZmVyVmlldyBkYXRhIChjb3JyZWN0IE1JTUUKICAgIHBlciBpbWFnZSks"
+    "IG5ldmVyIGFzIGRhdGEtVVJJcywgc28gdGhlIGZpbGUgcmVuZGVycyBpbiBhbnkgR0xCIHZpZXdl"
+    "ciAvCiAgICB3ZWJ2aWV3IHJlZ2FyZGxlc3Mgb2YgQ29udGVudC1TZWN1cml0eS1Qb2xpY3kuCgog"
+    "ICAgdGV4dHVyZXNfZGljdCA9IHsKICAgICAgICAnYWxiZWRvJzogJ3BhdGgvdG8vYWxiZWRvLnBu"
+    "ZycsCiAgICAgICAgJ21ldGFsbGljJzogJ3BhdGgvdG8vbWV0YWxsaWMucG5nJywKICAgICAgICAn"
+    "cm91Z2huZXNzJzogJ3BhdGgvdG8vcm91Z2huZXNzLnBuZycsCiAgICAgICAgJ25vcm1hbCc6ICdw"
+    "YXRoL3RvL25vcm1hbC5wbmcnLCAgICMgb3B0aW9uYWwKICAgICAgICAnYW8nOiAncGF0aC90by9h"
+    "by5wbmcnICAgICAgICAgICAgIyBvcHRpb25hbAogICAgfQogICAgIiIiCiAgICBpbXBvcnQgb3MK"
+    "CiAgICAjIFdvcmsgbmV4dCB0byB0aGUgT0JKIHNvIHRlbXBvcmFyeSBmaWxlcyBhcmUgbm90IGxv"
+    "c3QgYWNyb3NzIENXRCBjaGFuZ2VzLgogICAgd29ya19kaXIgPSBvcy5wYXRoLmRpcm5hbWUob3Mu"
+    "cGF0aC5hYnNwYXRoKG9ial9wYXRoKSkKCiAgICAjIDEuIExvYWQgdGhlIE9CSiBhbmQgZXhwb3J0"
+    "IGEgdGVtcG9yYXJ5IEdMQiBjb250YWluaW5nIG9ubHkgZ2VvbWV0cnkuCiAgICBtZXNoID0gdHJp"
+    "bWVzaC5sb2FkKG9ial9wYXRoKQogICAgdGVtcF9nbGIgPSBvcy5wYXRoLmpvaW4od29ya19kaXIs"
+    "ICJ0ZW1wLmdsYiIpCiAgICBtZXNoLmV4cG9ydCh0ZW1wX2dsYikKCiAgICAjIDIuIExvYWQgaXQg"
+    "YmFjayB0byBhdHRhY2ggUEJSIG1hdGVyaWFscy4KICAgIGdsdGYgPSBweWdsdGZsaWIuR0xURjIo"
+    "KS5sb2FkKHRlbXBfZ2xiKQoKICAgICMgMy4gQ29tYmluZSBtZXRhbGxpYyArIHJvdWdobmVzcyBp"
+    "bnRvIHRoZSBnbFRGIE1SIHRleHR1cmUgKEc9cm91Z2gsIEI9bWV0YWwpLgogICAgaWYgIm1ldGFs"
+    "bGljIiBpbiB0ZXh0dXJlc19kaWN0IGFuZCAicm91Z2huZXNzIiBpbiB0ZXh0dXJlc19kaWN0Ogog"
+    "ICAgICAgIG1yX2NvbWJpbmVkX3BhdGggPSBvcy5wYXRoLmpvaW4od29ya19kaXIsICJtcl9jb21i"
+    "aW5lZC5wbmciKQogICAgICAgIGNvbWJpbmVfbWV0YWxsaWNfcm91Z2huZXNzKAogICAgICAgICAg"
+    "ICB0ZXh0dXJlc19kaWN0WyJtZXRhbGxpYyJdLCB0ZXh0dXJlc19kaWN0WyJyb3VnaG5lc3MiXSwg"
+    "bXJfY29tYmluZWRfcGF0aAogICAgICAgICkKICAgICAgICB0ZXh0dXJlc19kaWN0WyJtZXRhbGxp"
+    "Y1JvdWdobmVzcyJdID0gbXJfY29tYmluZWRfcGF0aAoKICAgICMgNC4gQnVpbGQgYSBjbGVhbiBi"
+    "aW5hcnkgYnVmZmVyIGhvbGRpbmcgT05MWSB0aGUgZ2VvbWV0cnkgYWNjZXNzb3IgZGF0YSwKICAg"
+    "ICMgICAgdGhlbiBhcHBlbmQgdGhlIFBCUiB0ZXh0dXJlcyBhZnRlciBpdC4gdHJpbWVzaCdzIHRl"
+    "bXAgR0xCIG1heSBhbHJlYWR5CiAgICAjICAgIGVtYmVkIGEgKHdoaXRlIGRlZmF1bHQpIGltYWdl"
+    "ICsgYnVmZmVyVmlldzsgd2UgZHJvcCB0aG9zZSBhbmQgcHJvdmlkZQogICAgIyAgICBvdXIgb3du"
+    "LCBzbyB3ZSBtdXN0IHJlYnVpbGQgdGhlIGJ1ZmZlclZpZXcgdGFibGUgZnJvbSBzY3JhdGNoIGFu"
+    "ZAogICAgIyAgICByZS1tYXAgdGhlIGdlb21ldHJ5IGFjY2Vzc29ycyB0byB0aGUgbmV3IGNvbnRp"
+    "Z3VvdXMgb2Zmc2V0cy4KICAgIGFjY2Vzc29yX2luZGV4X3RvX2J2ID0ge30KICAgIGZvciBhaSwg"
+    "YWNjIGluIGVudW1lcmF0ZShnbHRmLmFjY2Vzc29ycyk6CiAgICAgICAgYnZfaW5kZXggPSBnZXRh"
+    "dHRyKGFjYywgImJ1ZmZlclZpZXciLCBOb25lKQogICAgICAgIGlmIGJ2X2luZGV4IGlzIG5vdCBO"
+    "b25lOgogICAgICAgICAgICBhY2Nlc3Nvcl9pbmRleF90b19idlthaV0gPSBidl9pbmRleAoKICAg"
+    "IG9sZF9idWZmZXJfdmlld3MgPSBnbHRmLmJ1ZmZlclZpZXdzCiAgICBvbGRfYmxvYiA9IGdsdGYu"
+    "YmluYXJ5X2Jsb2IoKSBvciBiIiIKCiAgICBiaW5hcnkgPSBieXRlYXJyYXkoKQogICAgbmV3X2J1"
+    "ZmZlcl92aWV3cyA9IFtdCiAgICAjIEdlb21ldHJ5IGFjY2Vzc29ycyByZWZlcmVuY2UgYnVmZmVy"
+    "Vmlld3MgYnkgaW5kZXg7IGtlZXAgYSBzdGFibGUgbWFwcGluZwogICAgIyBmcm9tIHRoZSBPTEQg"
+    "YnVmZmVyVmlldyBpbmRleCB0byB0aGUgTkVXIG9uZSBzbyBhY2Nlc3NvcnMgc3RheSB2YWxpZC4K"
+    "ICAgIG9sZF9idl90b19uZXcgPSB7fQogICAgZ2VvbWV0cnlfYnZfaW5kaWNlcyA9IHNldChhY2Nl"
+    "c3Nvcl9pbmRleF90b19idi52YWx1ZXMoKSkKICAgIGZvciBvbGRfYnZfaW5kZXggaW4gc29ydGVk"
+    "KGdlb21ldHJ5X2J2X2luZGljZXMpOgogICAgICAgIG9sZF9idiA9IG9sZF9idWZmZXJfdmlld3Nb"
+    "b2xkX2J2X2luZGV4XQogICAgICAgIGRhdGEgPSBvbGRfYmxvYltvbGRfYnYuYnl0ZU9mZnNldDpv"
+    "bGRfYnYuYnl0ZU9mZnNldCArIG9sZF9idi5ieXRlTGVuZ3RoXQogICAgICAgICMgNC1ieXRlIGFs"
+    "aWduIHRoZSBydW5uaW5nIGJ1ZmZlciBiZWZvcmUgYXBwZW5kaW5nLgogICAgICAgIHBhZCA9ICg0"
+    "IC0gKGxlbihiaW5hcnkpICUgNCkpICUgNAogICAgICAgIGlmIHBhZDoKICAgICAgICAgICAgYmlu"
+    "YXJ5ICs9IGIiXHgwMCIgKiBwYWQKICAgICAgICBuZXdfb2Zmc2V0ID0gbGVuKGJpbmFyeSkKICAg"
+    "ICAgICBiaW5hcnkgKz0gZGF0YQogICAgICAgIHBhZCA9ICg0IC0gKGxlbihkYXRhKSAlIDQpKSAl"
+    "IDQKICAgICAgICBpZiBwYWQ6CiAgICAgICAgICAgIGJpbmFyeSArPSBiIlx4MDAiICogcGFkCiAg"
+    "ICAgICAgbmV3X2J2ID0gcHlnbHRmbGliLkJ1ZmZlclZpZXcoCiAgICAgICAgICAgIGJ1ZmZlcj0w"
+    "LAogICAgICAgICAgICBieXRlT2Zmc2V0PW5ld19vZmZzZXQsCiAgICAgICAgICAgIGJ5dGVMZW5n"
+    "dGg9bGVuKGRhdGEpLAogICAgICAgICkKICAgICAgICBuZXdfaW5kZXggPSBsZW4obmV3X2J1ZmZl"
+    "cl92aWV3cykKICAgICAgICBuZXdfYnVmZmVyX3ZpZXdzLmFwcGVuZChuZXdfYnYpCiAgICAgICAg"
+    "b2xkX2J2X3RvX25ld1tvbGRfYnZfaW5kZXhdID0gbmV3X2luZGV4CgogICAgIyBSZS1wb2ludCBh"
+    "Y2Nlc3NvcnMgYXQgdGhlIHJlbWFwcGVkIGJ1ZmZlclZpZXdzLgogICAgZm9yIGFpLCBhY2MgaW4g"
+    "ZW51bWVyYXRlKGdsdGYuYWNjZXNzb3JzKToKICAgICAgICBvbGRfYnYgPSBnZXRhdHRyKGFjYywg"
+    "ImJ1ZmZlclZpZXciLCBOb25lKQogICAgICAgIGlmIG9sZF9idiBpcyBub3QgTm9uZSBhbmQgb2xk"
+    "X2J2IGluIG9sZF9idl90b19uZXc6CiAgICAgICAgICAgIGFjYy5idWZmZXJWaWV3ID0gb2xkX2J2"
+    "X3RvX25ld1tvbGRfYnZdCgogICAgIyBSZXNldCB0aGUgdGFibGVzOiBnZW9tZXRyeSB2aWV3cyBm"
+    "aXJzdCwgaW1hZ2VzL3RleHR1cmVzIGFwcGVuZGVkIG5leHQuCiAgICBnbHRmLmJ1ZmZlclZpZXdz"
+    "ID0gbmV3X2J1ZmZlcl92aWV3cwogICAgZ2x0Zi5pbWFnZXMgPSBbXQogICAgZ2x0Zi50ZXh0dXJl"
+    "cyA9IFtdCgogICAgaWYgZ2x0Zi5idWZmZXJzOgogICAgICAgIGdsdGYuYnVmZmVyc1swXS51cmkg"
+    "PSBOb25lCiAgICBlbHNlOgogICAgICAgIGdsdGYuYnVmZmVycyA9IFtweWdsdGZsaWIuQnVmZmVy"
+    "KGJ5dGVMZW5ndGg9MCldCgogICAgdGV4dHVyZXMgPSBbXQogICAgdGV4dHVyZV9pbmRleCA9IDAK"
+    "CiAgICBkZWYgYWRkX3RleHR1cmUoaW1hZ2VfcGF0aCk6CiAgICAgICAgbm9ubG9jYWwgdGV4dHVy"
+    "ZV9pbmRleAogICAgICAgIGltYWdlX2luZGV4ID0gX2dsYl9lbWJlZF9pbWFnZShnbHRmLCBiaW5h"
+    "cnksIGltYWdlX3BhdGgpCiAgICAgICAgdGV4dHVyZSA9IHB5Z2x0ZmxpYi5UZXh0dXJlKHNvdXJj"
+    "ZT1pbWFnZV9pbmRleCkKICAgICAgICBnbHRmLnRleHR1cmVzLmFwcGVuZCh0ZXh0dXJlKQogICAg"
+    "ICAgIGlkeCA9IHRleHR1cmVfaW5kZXgKICAgICAgICB0ZXh0dXJlX2luZGV4ICs9IDEKICAgICAg"
+    "ICByZXR1cm4gaWR4CgogICAgIyA1LiBCdWlsZCB0aGUgUEJSIG1hdGVyaWFsLCBhdHRhY2hpbmcg"
+    "dGV4dHVyZXMgaW4gZ2xURiBvcmRlci4KICAgIHBicl9tZXRhbGxpY19yb3VnaG5lc3MgPSBweWds"
+    "dGZsaWIuUGJyTWV0YWxsaWNSb3VnaG5lc3MoCiAgICAgICAgYmFzZUNvbG9yRmFjdG9yPVsxLjAs"
+    "IDEuMCwgMS4wLCAxLjBdLCBtZXRhbGxpY0ZhY3Rvcj0xLjAsIHJvdWdobmVzc0ZhY3Rvcj0xLjAK"
+    "ICAgICkKICAgIGlmIHRleHR1cmVzX2RpY3QuZ2V0KCJhbGJlZG8iKToKICAgICAgICBwYnJfbWV0"
+    "YWxsaWNfcm91Z2huZXNzLmJhc2VDb2xvclRleHR1cmUgPSBweWdsdGZsaWIuVGV4dHVyZUluZm8o"
+    "CiAgICAgICAgICAgIGluZGV4PWFkZF90ZXh0dXJlKHRleHR1cmVzX2RpY3RbImFsYmVkbyJdKQog"
+    "ICAgICAgICkKICAgIGlmIHRleHR1cmVzX2RpY3QuZ2V0KCJtZXRhbGxpY1JvdWdobmVzcyIpOgog"
+    "ICAgICAgIHBicl9tZXRhbGxpY19yb3VnaG5lc3MubWV0YWxsaWNSb3VnaG5lc3NUZXh0dXJlID0g"
+    "cHlnbHRmbGliLlRleHR1cmVJbmZvKAogICAgICAgICAgICBpbmRleD1hZGRfdGV4dHVyZSh0ZXh0"
+    "dXJlc19kaWN0WyJtZXRhbGxpY1JvdWdobmVzcyJdKQogICAgICAgICkKCiAgICBtYXRlcmlhbCA9"
+    "IHB5Z2x0ZmxpYi5NYXRlcmlhbCgKICAgICAgICBuYW1lPSJQQlJfTWF0ZXJpYWwiLCBwYnJNZXRh"
+    "bGxpY1JvdWdobmVzcz1wYnJfbWV0YWxsaWNfcm91Z2huZXNzCiAgICApCgogICAgaWYgdGV4dHVy"
+    "ZXNfZGljdC5nZXQoIm5vcm1hbCIpOgogICAgICAgIG1hdGVyaWFsLm5vcm1hbFRleHR1cmUgPSBw"
+    "eWdsdGZsaWIuTm9ybWFsVGV4dHVyZUluZm8oCiAgICAgICAgICAgIGluZGV4PWFkZF90ZXh0dXJl"
+    "KHRleHR1cmVzX2RpY3RbIm5vcm1hbCJdKQogICAgICAgICkKICAgIGlmIHRleHR1cmVzX2RpY3Qu"
+    "Z2V0KCJhbyIpOgogICAgICAgIG1hdGVyaWFsLm9jY2x1c2lvblRleHR1cmUgPSBweWdsdGZsaWIu"
+    "T2NjbHVzaW9uVGV4dHVyZUluZm8oCiAgICAgICAgICAgIGluZGV4PWFkZF90ZXh0dXJlKHRleHR1"
+    "cmVzX2RpY3RbImFvIl0pCiAgICAgICAgKQoKICAgIGdsdGYudGV4dHVyZXMgPSB0ZXh0dXJlcwog"
+    "ICAgZ2x0Zi5tYXRlcmlhbHMgPSBbbWF0ZXJpYWxdCgogICAgIyA2LiBBc3NpZ24gdGhlIG1hdGVy"
+    "aWFsIHRvIGV2ZXJ5IHByaW1pdGl2ZS4KICAgIGlmIGdsdGYubWVzaGVzOgogICAgICAgIGZvciBw"
+    "cmltaXRpdmUgaW4gZ2x0Zi5tZXNoZXNbMF0ucHJpbWl0aXZlczoKICAgICAgICAgICAgcHJpbWl0"
+    "aXZlLm1hdGVyaWFsID0gMAoKICAgICMgNy4gU2F2ZSBhcyBhIHJlYWwgR0xCIChiaW5hcnkgYmxv"
+    "YiBpbiB0aGUgZmluYWwgY2h1bmspLgogICAgZ2x0Zi5zZXRfYmluYXJ5X2Jsb2IoYnl0ZXMoYmlu"
+    "YXJ5KSkKICAgIGdsdGYuYnVmZmVyc1swXS5ieXRlTGVuZ3RoID0gbGVuKGJpbmFyeSkKICAgIGds"
+    "dGYuc2F2ZShvdXRwdXRfcGF0aCkKCiAgICAjIENsZWFuIHVwIHRoZSB0ZW1wIGdlb21ldHJ5IEdM"
+    "Qi4KICAgIHRyeToKICAgICAgICBvcy5yZW1vdmUodGVtcF9nbGIpCiAgICBleGNlcHQgT1NFcnJv"
+    "cjoKICAgICAgICBwYXNzCgogICAgcHJpbnQoZiJQQlIgR0xC5paH5Lu25bey5L+d5a2YOiB7b3V0"
+    "cHV0X3BhdGh9IikKCgo="
+).decode("utf-8")
+PBR_CONVERT_UTILS_SOURCE = PBR_CONVERT_UTILS_SOURCE.replace(
+    "gltf.textures.append(texture)",
+    "textures.append(texture)",
+)
+
 BOOTSTRAP_PACKAGES = ["pip>=24.3", "setuptools<81", "wheel>=0.43"]
 DEFAULT_PYTORCH_PROFILE = "cu124"
 TRANSFORMERS_PIN = "transformers==5.12.1"
@@ -445,14 +612,25 @@ def emit_timing(stage: str, started: float, path: str | None = None) -> None:
 
 
 def app_paths(app_data_dir: Path, pytorch_profile: Any = None) -> dict[str, Path]:
-    runtime_dir = app_data_dir / "runtime"
+    # The venv, runtime/source trees, and models may all live in the shared
+    # NekoLegendsAI store (so they persist across app version upgrades). The Rust
+    # host sets I3D_ENV_DIR / I3D_RUNTIME_DIR / I3D_MODEL_DIR when it has resolved
+    # store paths; honor them, falling back to the app-data-relative defaults.
+    configured_env_dir = os.environ.get("I3D_ENV_DIR")
+    env_dir = (
+        Path(configured_env_dir)
+        if configured_env_dir
+        else env_dir_for_profile(app_data_dir, pytorch_profile)
+    )
+    configured_runtime_dir = os.environ.get("I3D_RUNTIME_DIR")
+    runtime_dir = Path(configured_runtime_dir) if configured_runtime_dir else app_data_dir / "runtime"
     configured_model_dir = os.environ.get("I3D_MODEL_DIR") or os.environ.get("IH3D_MODEL_DIR")
     model_dir = Path(configured_model_dir) if configured_model_dir else app_data_dir / "models"
     return {
         "app_data": app_data_dir,
         "cache_dir": app_data_dir / "cache",
         "tmp_dir": app_data_dir / "tmp",
-        "env_dir": env_dir_for_profile(app_data_dir, pytorch_profile),
+        "env_dir": env_dir,
         "runtime_dir": runtime_dir,
         "source_dir": runtime_dir / "Hunyuan3D-2.1",
         "hunyuan_source_dir": runtime_dir / "Hunyuan3D-2.1",
@@ -1660,6 +1838,28 @@ def patch_hunyuan_source(source_dir: Path) -> None:
         texture_pipeline.write_text(content, encoding="utf-8")
         emit("setup", "Patched Hunyuan texture export for standalone GLB output")
 
+    write_pbr_convert_utils(source_dir / "hy3dpaint" / "convert_utils.py")
+
+
+def write_pbr_convert_utils(convert_utils_path: Path) -> None:
+    """Materialize hy3dpaint/convert_utils.py so textures embed as standard GLB
+    binary bufferView data (correct MIME per image) instead of base64 data-URIs.
+
+    Data-URI textures live in the GLB JSON chunk and are loaded through a path
+    governed by the page Content-Security-Policy connect-src; locked-down
+    webviews silently drop them, leaving the model untextured. Binary bufferView
+    textures load through the GLB loader and render everywhere.
+    """
+    marker = "create_glb_with_pbr_materials"
+    required_texture_line = "        textures.append(texture)\n"
+    if convert_utils_path.is_file():
+        existing = convert_utils_path.read_text(encoding="utf-8")
+        if "binary bufferView" in existing and marker in existing and required_texture_line in existing:
+            return
+    convert_utils_path.parent.mkdir(parents=True, exist_ok=True)
+    convert_utils_path.write_text(PBR_CONVERT_UTILS_SOURCE, encoding="utf-8")
+    emit("setup", "Wrote PBR GLB convert_utils with binary texture embedding")
+
 
 def ensure_wheel_source(paths: dict[str, Path]) -> Path:
     wheel_source_dir = paths["wheel_source_dir"]
@@ -2078,6 +2278,8 @@ def managed_env_vars(app_data_dir: Path, paths: dict[str, Path]) -> dict[str, st
     env["I3D_HUNYUAN_SOURCE_DIR"] = str(paths["hunyuan_source_dir"])
     env["I3D_TRELLIS_SOURCE_DIR"] = str(paths["trellis_source_dir"])
     env["I3D_APP_DATA_DIR"] = str(app_data_dir)
+    env["I3D_ENV_DIR"] = str(paths["env_dir"])
+    env["I3D_RUNTIME_DIR"] = str(paths["runtime_dir"])
     env["IH3D_IN_MANAGED_ENV"] = "1"
     env["IH3D_SOURCE_DIR"] = str(paths["hunyuan_source_dir"])
     env.setdefault("ATTN_BACKEND", "sdpa")
@@ -2538,6 +2740,173 @@ def repair_glb_embedded_image_mime_types(path: Path) -> int:
     return changed
 
 
+def _read_glb_accessor(gltf: Any, blob: bytes, accessor_index: int):
+    import numpy as np
+
+    component_dtypes = {
+        5120: np.dtype("<i1"),
+        5121: np.dtype("<u1"),
+        5122: np.dtype("<i2"),
+        5123: np.dtype("<u2"),
+        5125: np.dtype("<u4"),
+        5126: np.dtype("<f4"),
+    }
+    component_counts = {
+        "SCALAR": 1,
+        "VEC2": 2,
+        "VEC3": 3,
+        "VEC4": 4,
+        "MAT2": 4,
+        "MAT3": 9,
+        "MAT4": 16,
+    }
+    accessor = gltf.accessors[accessor_index]
+    if accessor.bufferView is None or accessor.sparse is not None:
+        raise RuntimeError("Sparse or bufferless GLB accessors are not supported for normal smoothing.")
+    view = gltf.bufferViews[accessor.bufferView]
+    dtype = component_dtypes.get(accessor.componentType)
+    components = component_counts.get(accessor.type)
+    if dtype is None or components is None:
+        raise RuntimeError(f"Unsupported GLB accessor format: {accessor.componentType}/{accessor.type}")
+    packed_stride = dtype.itemsize * components
+    stride = int(view.byteStride or packed_stride)
+    offset = int(view.byteOffset or 0) + int(accessor.byteOffset or 0)
+    if offset < 0 or offset + max(0, accessor.count - 1) * stride + packed_stride > len(blob):
+        raise RuntimeError("GLB accessor points outside the binary buffer.")
+    return np.ndarray(
+        shape=(accessor.count, components),
+        dtype=dtype,
+        buffer=blob,
+        offset=offset,
+        strides=(stride, dtype.itemsize),
+    ).copy()
+
+
+def smooth_glb_normals(path: Path) -> int:
+    """Write area-weighted vertex normals while preserving UV seams and textures."""
+    import numpy as np
+    from pygltflib import Accessor, BufferView, GLTF2
+
+    gltf = GLTF2().load(str(path))
+    if not gltf.buffers:
+        return 0
+    gltf.bufferViews = gltf.bufferViews or []
+    gltf.accessors = gltf.accessors or []
+    blob = bytearray(gltf.binary_blob())
+    primitives_updated = 0
+
+    for mesh in gltf.meshes or []:
+        entries: list[tuple[Any, Any, Any]] = []
+        all_positions = []
+        for primitive in mesh.primitives or []:
+            if primitive.mode not in (None, 4) or primitive.attributes.POSITION is None:
+                continue
+            positions = _read_glb_accessor(
+                gltf,
+                bytes(blob),
+                primitive.attributes.POSITION,
+            ).astype(np.float64, copy=False)
+            if positions.shape[1] != 3:
+                continue
+            if primitive.indices is None:
+                indices = np.arange(len(positions), dtype=np.int64)
+            else:
+                indices = _read_glb_accessor(gltf, bytes(blob), primitive.indices).reshape(-1).astype(np.int64)
+            usable = len(indices) - (len(indices) % 3)
+            if usable < 3:
+                continue
+            triangles = indices[:usable].reshape(-1, 3)
+            valid = np.all((triangles >= 0) & (triangles < len(positions)), axis=1)
+            triangles = triangles[valid]
+            if len(triangles) == 0:
+                continue
+            entries.append((primitive, positions, triangles))
+            all_positions.append(positions)
+
+        if not entries:
+            continue
+        combined = np.concatenate(all_positions, axis=0)
+        span = float(np.ptp(combined, axis=0).max(initial=0.0))
+        tolerance = max(span * 1e-6, 1e-9)
+        accumulated: dict[tuple[int, int, int], Any] = {}
+        entry_keys: list[Any] = []
+
+        for _, positions, triangles in entries:
+            keys = np.rint(positions / tolerance).astype(np.int64)
+            entry_keys.append(keys)
+            for a, b, c in triangles:
+                normal = np.cross(positions[b] - positions[a], positions[c] - positions[a])
+                if float(np.dot(normal, normal)) <= 1e-24:
+                    continue
+                for vertex in (a, b, c):
+                    key = tuple(int(value) for value in keys[vertex])
+                    current = accumulated.get(key)
+                    if current is None:
+                        accumulated[key] = normal.copy()
+                    else:
+                        current += normal
+
+        for (primitive, positions, _), keys in zip(entries, entry_keys):
+            normals = np.empty((len(positions), 3), dtype=np.float32)
+            for vertex, key_values in enumerate(keys):
+                key = tuple(int(value) for value in key_values)
+                normal = accumulated.get(key)
+                length = float(np.linalg.norm(normal)) if normal is not None else 0.0
+                normals[vertex] = normal / length if length > 1e-12 else (0.0, 1.0, 0.0)
+
+            while len(blob) % 4:
+                blob.append(0)
+            byte_offset = len(blob)
+            normal_bytes = normals.astype("<f4", copy=False).tobytes()
+            blob.extend(normal_bytes)
+            gltf.bufferViews.append(
+                BufferView(
+                    buffer=0,
+                    byteOffset=byte_offset,
+                    byteLength=len(normal_bytes),
+                    target=34962,
+                )
+            )
+            gltf.accessors.append(
+                Accessor(
+                    bufferView=len(gltf.bufferViews) - 1,
+                    byteOffset=0,
+                    componentType=5126,
+                    count=len(normals),
+                    type="VEC3",
+                    min=normals.min(axis=0).tolist(),
+                    max=normals.max(axis=0).tolist(),
+                )
+            )
+            primitive.attributes.NORMAL = len(gltf.accessors) - 1
+            primitives_updated += 1
+
+    if primitives_updated == 0:
+        return 0
+    while len(blob) % 4:
+        blob.append(0)
+    gltf.buffers[0].byteLength = len(blob)
+    gltf.set_binary_blob(bytes(blob))
+    temporary = path.with_name(f"{path.stem}.normals.tmp.glb")
+    gltf.save(str(temporary))
+    temporary.replace(path)
+    return primitives_updated
+
+
+def maybe_smooth_exported_glb(path: Path, options: dict[str, Any], image_path: Path | None = None) -> int:
+    if not as_bool(options.get("smoothNormals"), True) or path.suffix.lower() != ".glb":
+        return 0
+    primitives = smooth_glb_normals(path)
+    if primitives:
+        emit(
+            "setup",
+            f"Smoothed normals for {primitives} GLB mesh primitive"
+            f"{'s' if primitives != 1 else ''}.",
+            path=str(image_path) if image_path else None,
+        )
+    return primitives
+
+
 def cleanup_job_scratch(jobs_dir: Path, keep: Path | None = None) -> None:
     if not jobs_dir.is_dir():
         return
@@ -2791,6 +3160,16 @@ def get_hunyuan_paint_pipeline(
     else:
         apply_texture_options(paint_pipeline.config, options)
         emit("model", "Reusing loaded Hunyuan3D PBR texture model")
+    shader_type = "vertex" if as_bool(options.get("smoothNormals"), True) else "face"
+    if hasattr(paint_pipeline, "render") and hasattr(paint_pipeline.render, "shader_type"):
+        previous_shader_type = paint_pipeline.render.shader_type
+        paint_pipeline.render.shader_type = shader_type
+        if previous_shader_type != shader_type:
+            emit(
+                "setup",
+                "Texture conditioning uses "
+                f"{'smooth vertex' if shader_type == 'vertex' else 'flat face'} normals.",
+            )
     return paint_pipeline
 
 
@@ -2979,6 +3358,7 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
 
                 if mode == "meshOnly":
                     shutil.move(str(intermediate_mesh), str(final_mesh_path))
+                    maybe_smooth_exported_glb(final_mesh_path, options, image_path)
                     outputs.append(str(final_mesh_path.resolve()))
                 else:
                     if mode == "meshTexture":
@@ -3025,6 +3405,7 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
                             final_mesh_path.unlink()
                         shutil.move(str(result_path), str(final_mesh_path))
                     if final_mesh_path.is_file():
+                        maybe_smooth_exported_glb(final_mesh_path, options, image_path)
                         repaired_images = repair_glb_embedded_image_mime_types(final_mesh_path)
                         if repaired_images:
                             emit(
@@ -3432,6 +3813,12 @@ def trellis_export_glb(mesh: Any, target: Path, options: dict[str, Any]) -> dict
             "atlasPadding": 0,
             "postprocessError": str(error),
         }
+    if as_bool(options.get("smoothNormals"), True):
+        try:
+            stats["smoothedNormalPrimitives"] = maybe_smooth_exported_glb(target, options)
+        except Exception as error:
+            emit("setup", f"TRELLIS.2 smooth-normal export skipped: {error}")
+            stats["smoothNormalsError"] = str(error)
     texels_per_face = stats.get("texelsPerFace")
     if isinstance(texels_per_face, (int, float)) and texels_per_face < 30:
         emit(

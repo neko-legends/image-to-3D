@@ -114,6 +114,12 @@ struct HunyuanOptions {
     output_dir: String,
     output_name: String,
     mesh_input_path: String,
+    #[serde(default)]
+    model_dir: String,
+    #[serde(default)]
+    env_dir: String,
+    #[serde(default)]
+    runtime_dir: String,
     recursive: bool,
     overwrite: bool,
     mesh_detail: String,
@@ -195,6 +201,83 @@ struct HunyuanOptions {
     trellis_remesh: bool,
     #[serde(default = "default_true")]
     trellis_export_webp: bool,
+}
+
+impl Default for HunyuanOptions {
+    /// Structural default. Used to build a minimal options value (e.g. for
+    /// `check_runtime`) where only a subset of fields matter. Individual command
+    /// paths always deserialize a full options object from the frontend, so this
+    /// never shadows real user settings.
+    fn default() -> Self {
+        HunyuanOptions {
+            model_backend: default_model_backend(),
+            mode: "meshTexture".to_string(),
+            cuda_device: "auto".to_string(),
+            runtime_profile: DEFAULT_PYTORCH_PROFILE.to_string(),
+            output_dir: String::new(),
+            output_name: String::new(),
+            mesh_input_path: String::new(),
+            model_dir: String::new(),
+            env_dir: String::new(),
+            runtime_dir: String::new(),
+            recursive: false,
+            overwrite: false,
+            mesh_detail: "medium".to_string(),
+            mesh_steps: 0,
+            mesh_guidance: 0.0,
+            mesh_seed: 0,
+            mesh_seed_mode: "fixed".to_string(),
+            box_v: 0.0,
+            octree_resolution: 0,
+            num_chunks: 0,
+            mc_level: 0.0,
+            mc_algo: String::new(),
+            enable_flash_vdm: false,
+            compile_models: false,
+            force_offload: false,
+            remove_floaters: false,
+            remove_degenerate_faces: false,
+            reduce_faces: false,
+            max_faces: 0,
+            smooth_normals: false,
+            voxelize: false,
+            voxel_resolution: default_voxel_resolution(),
+            texture_view_size: 0,
+            texture_steps: 0,
+            texture_guidance: 0.0,
+            texture_size: 0,
+            texture_seed: 0,
+            texture_seed_mode: "fixed".to_string(),
+            unwrap_mesh: false,
+            camera_azimuths: String::new(),
+            camera_elevations: String::new(),
+            view_weights: String::new(),
+            ortho_scale: 0.0,
+            trellis_preset: default_trellis_preset(),
+            trellis_autocrop: true,
+            trellis_force_opaque: true,
+            trellis_atlas_padding: default_trellis_atlas_padding(),
+            trellis_resolution: default_trellis_resolution(),
+            trellis_seed: default_trellis_seed(),
+            trellis_seed_mode: default_randomize_seed_mode(),
+            trellis_sparse_steps: default_trellis_sparse_steps(),
+            trellis_sparse_guidance: default_trellis_sparse_guidance(),
+            trellis_sparse_rescale: default_trellis_sparse_rescale(),
+            trellis_sparse_rescale_t: default_trellis_sparse_rescale_t(),
+            trellis_shape_steps: default_trellis_shape_steps(),
+            trellis_shape_guidance: default_trellis_shape_guidance(),
+            trellis_shape_rescale: default_trellis_shape_rescale(),
+            trellis_shape_rescale_t: default_trellis_shape_rescale_t(),
+            trellis_texture_steps: default_trellis_texture_steps(),
+            trellis_texture_guidance: default_trellis_texture_guidance(),
+            trellis_texture_rescale: default_trellis_texture_rescale(),
+            trellis_texture_rescale_t: default_trellis_texture_rescale_t(),
+            trellis_decimation_target: default_trellis_decimation_target(),
+            trellis_texture_size: default_trellis_texture_size(),
+            trellis_remesh: false,
+            trellis_export_webp: true,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -676,44 +759,224 @@ fn normalize_runtime_profile(profile: &str) -> String {
     }
 }
 
+/// Resolve the venv dir honoring user/store options. Callers that already have
+/// `&HunyuanOptions` should call this; legacy callers without options fall back
+/// to the options-less `env_dir_for_profile` below.
+fn env_dir_for_profile_opts(
+    app: &AppHandle,
+    options: &HunyuanOptions,
+    profile: &str,
+) -> Result<PathBuf, String> {
+    resolve_env_dir(app, options, &normalize_runtime_profile(profile))
+}
+
 fn env_dir_for_profile(app: &AppHandle, profile: &str) -> Result<PathBuf, String> {
-    let app_data = app_data_dir(app)?;
-    let profile = normalize_runtime_profile(profile);
-    let profiled_env = app_data.join(format!("python-env-{profile}"));
-    if profiled_env.exists() {
-        return Ok(profiled_env);
+    env_dir_for_profile_opts(app, &HunyuanOptions::default(), profile)
+}
+
+/// Resolve the runtime (source tree) dir honoring user/store options.
+fn runtime_dir_opts(app: &AppHandle, options: &HunyuanOptions) -> Result<PathBuf, String> {
+    resolve_runtime_dir(app, options)
+}
+
+fn hunyuan_source_dir_opts(app: &AppHandle, options: &HunyuanOptions) -> Result<PathBuf, String> {
+    Ok(runtime_dir_opts(app, options)?.join("Hunyuan3D-2.1"))
+}
+
+fn trellis_source_dir_opts(app: &AppHandle, options: &HunyuanOptions) -> Result<PathBuf, String> {
+    Ok(runtime_dir_opts(app, options)?.join("TRELLIS.2"))
+}
+
+/// Resolve the directory used to store downloaded model files.
+///
+/// Priority:
+///   1. A user-chosen path (from the setup UI) wins outright, so a user can
+///      relocate the multi-GB model cache to a data drive and keep it stable
+///      across app version upgrades.
+///   2. A pre-existing app-local `data/models` folder that actually contains a
+///      real download is auto-migrated into the shared NekoLegendsAI store
+///      (once), so legacy users don't re-download.
+///   3. Otherwise the shared NekoLegendsAI store is used — it lives outside the
+///      version-specific app folder and persists across upgrades.
+///
+/// The previous logic preferred any existing `data/models`, but the publish
+/// script created that folder empty on every release, so the shared store was
+/// bypassed and models were re-downloaded for each new version.
+fn resolve_model_dir(app: &AppHandle, options: &HunyuanOptions) -> Result<PathBuf, String> {
+    let requested = options.model_dir.trim();
+    if !requested.is_empty() {
+        let path = PathBuf::from(requested);
+        fs::create_dir_all(&path)
+            .map_err(|error| format!("Unable to create model folder {requested}: {error}"))?;
+        return Ok(path);
     }
 
-    let legacy_env = app_data.join("python-env");
-    if legacy_env.exists() && env_runtime_profile(&legacy_env) == profile {
-        return Ok(legacy_env);
-    }
-
-    Ok(profiled_env)
-}
-
-fn runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_data_dir(app)?.join("runtime"))
-}
-
-fn hunyuan_source_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(runtime_dir(app)?.join("Hunyuan3D-2.1"))
-}
-
-fn trellis_source_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(runtime_dir(app)?.join("TRELLIS.2"))
-}
-
-fn model_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    // Preserve any pre-existing app-local models folder so upgrades never orphan
-    // already-downloaded models. New installs use the shared NekoLegendsAI store,
-    // which co-locates with the same HF_HOME the worker env already expects.
     let app_data = app_data_dir(app)?;
     let legacy = app_data.join("models");
-    if legacy.exists() {
-        return Ok(legacy);
+    let store_models = neko_store(app)?.models_dir;
+
+    // Auto-migrate a real legacy download into the shared store (once).
+    // Only migrate when the legacy folder holds an actual download — not the
+    // empty placeholder the publish script leaves behind — and the store target
+    // does not already contain models.
+    if legacy_models_present(&legacy) && !target_has_models(&store_models) {
+        if let Err(error) = migrate_legacy_models(&legacy, &store_models) {
+            eprintln!("Model migration to shared store failed: {error}");
+            // Fall back to the legacy folder so this run still works.
+            return Ok(legacy);
+        }
     }
-    Ok(neko_store(app)?.models_dir)
+
+    Ok(store_models)
+}
+
+/// True when a folder contains a real model download (a readiness marker or a
+/// populated Hugging Face hub cache). Empty placeholder folders return false.
+fn legacy_models_present(dir: &Path) -> bool {
+    if !dir.is_dir() {
+        return false;
+    }
+    if dir.join(HUNYUAN_MODEL_MARKER).is_file() || dir.join(TRELLIS_MODEL_MARKER).is_file() {
+        return true;
+    }
+    let hub = dir.join("huggingface").join("hub");
+    match fs::read_dir(&hub) {
+        Ok(entries) => entries.filter_map(Result::ok).any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .map(|name| name.starts_with("models--"))
+                .unwrap_or(false)
+        }),
+        Err(_) => false,
+    }
+}
+
+/// True when a target folder already holds downloaded models.
+fn target_has_models(dir: &Path) -> bool {
+    legacy_models_present(dir)
+}
+
+/// Move the contents of a legacy model folder into the shared store, leaving the
+/// legacy folder empty. Any file that already exists at the target is left in
+/// place (the legacy copy is removed) so a re-run after a partial migration is
+/// safe.
+fn migrate_legacy_models(legacy: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target)
+        .map_err(|error| format!("Unable to create shared model folder: {error}"))?;
+
+    let entries = fs::read_dir(legacy)
+        .map_err(|error| format!("Unable to read legacy model folder: {error}"))?;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let from = entry.path();
+        let to = target.join(&name);
+        if from.is_dir() {
+            // Merge directory trees (e.g. huggingface/hub) recursively.
+            merge_dir(&from, &to)
+                .map_err(|error| format!("Failed merging {}: {error}", from.display()))?;
+            let _ = fs::remove_dir_all(&from);
+        } else if to.exists() {
+            let _ = fs::remove_file(&from);
+        } else if let Err(error) = fs::rename(&from, &to) {
+            // Cross-volume rename can fail; fall back to copy + remove.
+            fs::copy(&from, &to)
+                .map_err(|error| format!("Failed copying {}: {error}", from.display()))?;
+            let _ = fs::remove_file(&from);
+            eprintln!("Renamed {error}; copied {} instead.", from.display());
+        }
+    }
+    Ok(())
+}
+
+/// Recursively copy `from` into `to` without overwriting existing files.
+fn merge_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dest = to.join(entry.file_name());
+        if path.is_dir() {
+            merge_dir(&path, &dest)?;
+        } else if !dest.exists() {
+            fs::copy(&path, &dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Move a directory tree to a new location, merging contents and tolerating a
+/// cross-volume source (where `rename` fails). Leaves `from` removed on success.
+fn move_dir(from: &Path, to: &Path) -> Result<(), String> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    merge_dir(from, to).map_err(|error| format!("Failed merging {}: {error}", from.display()))?;
+    let _ = fs::remove_dir_all(from);
+    Ok(())
+}
+
+/// Resolve the directory used to store the Python virtual environment.
+///
+/// Mirrors `resolve_model_dir`: a user override wins; otherwise the shared
+/// NekoLegendsAI store is used so the venv persists across app version upgrades.
+/// A pre-existing version-local venv that holds a real install is auto-migrated
+/// into the store once.
+fn resolve_env_dir(app: &AppHandle, options: &HunyuanOptions, profile: &str) -> Result<PathBuf, String> {
+    let requested = options.env_dir.trim();
+    if !requested.is_empty() {
+        let path = PathBuf::from(requested).join(format!("python-env-{profile}"));
+        fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))
+            .map_err(|error| format!("Unable to create env folder: {error}"))?;
+        return Ok(path);
+    }
+
+    let app_data = app_data_dir(app)?;
+    let legacy = app_data.join(format!("python-env-{profile}"));
+    let store_env = neko_store(app)?.env_dir.join(format!("python-env-{profile}"));
+
+    // Auto-migrate a real legacy venv into the shared store (once).
+    if legacy.is_dir() && legacy.join(ENV_MARKER).is_file() && !store_env.join(ENV_MARKER).is_file() {
+        if let Err(error) = move_dir(&legacy, &store_env) {
+            eprintln!("Venv migration to shared store failed: {error}");
+            return Ok(legacy);
+        }
+    }
+
+    Ok(store_env)
+}
+
+/// Resolve the directory used to store the Hunyuan/TRELLIS source trees (and
+/// their build artifacts). Mirrors `resolve_model_dir`: a user override wins,
+/// otherwise the shared store is used, with one-time auto-migration of a real
+/// legacy source tree.
+fn resolve_runtime_dir(app: &AppHandle, options: &HunyuanOptions) -> Result<PathBuf, String> {
+    let requested = options.runtime_dir.trim();
+    if !requested.is_empty() {
+        let path = PathBuf::from(requested);
+        fs::create_dir_all(&path)
+            .map_err(|error| format!("Unable to create runtime folder: {error}"))?;
+        return Ok(path);
+    }
+
+    let app_data = app_data_dir(app)?;
+    let legacy = app_data.join("runtime");
+    let store_runtime = neko_store(app)?.root.join("runtimes").join(NEKO_APP_SLUG);
+
+    // Auto-migrate a real legacy source tree into the shared store (once).
+    let legacy_has_source = legacy.join("Hunyuan3D-2.1").join(HUNYUAN_SOURCE_MARKER).is_file()
+        || legacy.join("TRELLIS.2").join(TRELLIS_SOURCE_MARKER).is_file();
+    let store_has_source = store_runtime.join("Hunyuan3D-2.1").join(HUNYUAN_SOURCE_MARKER).is_file()
+        || store_runtime.join("TRELLIS.2").join(TRELLIS_SOURCE_MARKER).is_file();
+    if legacy_has_source && !store_has_source {
+        if let Err(error) = move_dir(&legacy, &store_runtime) {
+            eprintln!("Runtime source migration to shared store failed: {error}");
+            return Ok(legacy);
+        }
+    }
+
+    Ok(store_runtime)
 }
 
 fn default_output_dir() -> Result<PathBuf, String> {
@@ -889,6 +1152,9 @@ fn default_hunyuan_options() -> HunyuanOptions {
         output_dir: String::new(),
         output_name: String::new(),
         mesh_input_path: String::new(),
+        model_dir: String::new(),
+        env_dir: String::new(),
+        runtime_dir: String::new(),
         recursive: true,
         overwrite: false,
         mesh_detail: "low".to_string(),
@@ -1332,9 +1598,11 @@ fn configure_worker_command(command: &mut Command) {
 fn configure_managed_worker_env(
     command: &mut Command,
     app_data: &Path,
+    env_dir: &Path,
     hunyuan_source: &Path,
     trellis_source: &Path,
     models: &Path,
+    runtime_dir: &Path,
 ) {
     configure_worker_storage_env(command, models);
     command
@@ -1342,6 +1610,8 @@ fn configure_managed_worker_env(
         .env("I3D_HUNYUAN_SOURCE_DIR", hunyuan_source)
         .env("I3D_TRELLIS_SOURCE_DIR", trellis_source)
         .env("I3D_APP_DATA_DIR", app_data)
+        .env("I3D_ENV_DIR", env_dir)
+        .env("I3D_RUNTIME_DIR", runtime_dir)
         .env("IH3D_IN_MANAGED_ENV", "1")
         .env("IH3D_SOURCE_DIR", hunyuan_source)
         .env("IH3D_APP_DATA_DIR", app_data)
@@ -1477,10 +1747,10 @@ fn model_cache_has_snapshot(model_root: &Path, repo: &str) -> bool {
 fn runtime_ready_for_generation(app: &AppHandle, options: &HunyuanOptions) -> Result<(), String> {
     let requested_profile = normalize_runtime_profile(&options.runtime_profile);
     let model_backend = normalize_model_backend(&options.model_backend);
-    let env = env_dir_for_profile(app, &requested_profile)?;
-    let hunyuan_source = hunyuan_source_dir(app)?;
-    let trellis_source = trellis_source_dir(app)?;
-    let models = model_dir(app)?;
+    let env = env_dir_for_profile_opts(app, options, &requested_profile)?;
+    let hunyuan_source = hunyuan_source_dir_opts(app, options)?;
+    let trellis_source = trellis_source_dir_opts(app, options)?;
+    let models = resolve_model_dir(app, options)?;
     let env_python = env_python_path(&env);
     if !env_python.is_file() || !env.join(ENV_MARKER).is_file() {
         return Err("Setup is needed before generation. Choose Set up now first.".to_string());
@@ -1548,6 +1818,9 @@ fn check_runtime(
     app: AppHandle,
     runtime_profile: Option<String>,
     model_backend: Option<String>,
+    model_dir: Option<String>,
+    env_dir: Option<String>,
+    runtime_dir: Option<String>,
 ) -> Result<RuntimeStatus, String> {
     let requested_profile = normalize_runtime_profile(
         runtime_profile
@@ -1557,16 +1830,22 @@ fn check_runtime(
     let selected_backend = normalize_model_backend(model_backend.as_deref().unwrap_or("hunyuan"));
     let app_data = app_data_dir(&app)?;
     let worker = worker_path(&app)?;
-    let env = env_dir_for_profile(&app, &requested_profile)?;
+    let resolved_options = HunyuanOptions {
+        model_dir: model_dir.unwrap_or_default(),
+        env_dir: env_dir.unwrap_or_default(),
+        runtime_dir: runtime_dir.unwrap_or_default(),
+        ..Default::default()
+    };
+    let env = env_dir_for_profile_opts(&app, &resolved_options, &requested_profile)?;
     let env_python = env_python_path(&env);
-    let hunyuan_source = hunyuan_source_dir(&app)?;
-    let trellis_source = trellis_source_dir(&app)?;
+    let hunyuan_source = hunyuan_source_dir_opts(&app, &resolved_options)?;
+    let trellis_source = trellis_source_dir_opts(&app, &resolved_options)?;
     let source = if selected_backend == "trellis2" {
         trellis_source.clone()
     } else {
         hunyuan_source.clone()
     };
-    let models = model_dir(&app)?;
+    let models = resolve_model_dir(&app, &resolved_options)?;
     let outputs = default_output_dir()?;
     let jobs = jobs_dir(&app)?;
     let tencent_ready = model_cache_has_snapshot(&models, "tencent/Hunyuan3D-2.1");
@@ -1814,7 +2093,7 @@ fn ensure_managed_worker(
     }
     managed_workers.stop()?;
 
-    let env = env_dir_for_profile(app, &runtime_profile)?;
+    let env = env_dir_for_profile_opts(app, options, &runtime_profile)?;
     let worker_path = worker_path(app)?;
     let app_data = app_data_dir(app)?;
     let mut command = Command::new(env_python_path(&env));
@@ -1822,9 +2101,11 @@ fn ensure_managed_worker(
     configure_managed_worker_env(
         &mut command,
         &app_data,
-        &hunyuan_source_dir(app)?,
-        &trellis_source_dir(app)?,
-        &model_dir(app)?,
+        &env,
+        &hunyuan_source_dir_opts(app, options)?,
+        &trellis_source_dir_opts(app, options)?,
+        &resolve_model_dir(app, options)?,
+        &runtime_dir_opts(app, options)?,
     );
     command
         .arg(worker_path)
@@ -1974,7 +2255,7 @@ fn start_worker_job_core(
     }
 
     let mut command = if action == "generate" {
-        let env = env_dir_for_profile(&app, &requested_profile)?;
+        let env = env_dir_for_profile_opts(&app, &job.options, &requested_profile)?;
         Command::new(env_python_path(&env))
     } else {
         let python = find_python().ok_or_else(|| {
@@ -1984,15 +2265,21 @@ fn start_worker_job_core(
     };
     configure_worker_command(&mut command);
     if action == "generate" {
+        let env = env_dir_for_profile_opts(&app, &job.options, &requested_profile)?;
         configure_managed_worker_env(
             &mut command,
             &app_data,
-            &hunyuan_source_dir(&app)?,
-            &trellis_source_dir(&app)?,
-            &model_dir(&app)?,
+            &env,
+            &hunyuan_source_dir_opts(&app, &job.options)?,
+            &trellis_source_dir_opts(&app, &job.options)?,
+            &resolve_model_dir(&app, &job.options)?,
+            &runtime_dir_opts(&app, &job.options)?,
         );
     } else {
-        configure_worker_storage_env(&mut command, &model_dir(&app)?);
+        configure_worker_storage_env(&mut command, &resolve_model_dir(&app, &job.options)?);
+        command
+            .env("I3D_ENV_DIR", env_dir_for_profile_opts(&app, &job.options, &requested_profile)?)
+            .env("I3D_RUNTIME_DIR", runtime_dir_opts(&app, &job.options)?);
     }
     command
         .arg(worker)
@@ -2162,7 +2449,7 @@ fn reset_python_runtime(
         fs::remove_dir_all(&env)
             .map_err(|error| format!("Unable to reset Python runtime: {error}"))?;
     }
-    check_runtime(app, Some(requested_profile), model_backend)
+    check_runtime(app, Some(requested_profile), model_backend, None, None, None)
 }
 
 #[tauri::command]
@@ -2177,7 +2464,7 @@ fn unload_models(
         return Err("Wait for the current job to finish before unloading models.".to_string());
     }
     managed_workers.stop()?;
-    check_runtime(app, runtime_profile, model_backend)
+    check_runtime(app, runtime_profile, model_backend, None, None, None)
 }
 
 struct HttpRequest {
@@ -2565,7 +2852,10 @@ fn handle_agent_route(
         ("GET", "/runtime") => {
             let runtime_profile = query_value(request.query.as_deref(), "runtimeProfile");
             let model_backend = query_value(request.query.as_deref(), "modelBackend");
-            serde_json::to_value(check_runtime(app.clone(), runtime_profile, model_backend)?)
+            let model_dir = query_value(request.query.as_deref(), "modelDir");
+            let env_dir = query_value(request.query.as_deref(), "envDir");
+            let runtime_dir = query_value(request.query.as_deref(), "runtimeDir");
+            serde_json::to_value(check_runtime(app.clone(), runtime_profile, model_backend, model_dir, env_dir, runtime_dir)?)
                 .map_err(|error| error.to_string())
         }
         ("GET", "/vram") => {
@@ -2615,7 +2905,7 @@ fn handle_agent_route(
             let request = parse_agent_job_request(&request.body)?;
             let options = agent_options_from_request(request.options)?;
             let runtime_profile = normalize_runtime_profile(&options.runtime_profile);
-            let env = env_dir_for_profile(app, &runtime_profile)?;
+            let env = env_dir_for_profile_opts(app, &options, &runtime_profile)?;
             if env.exists() {
                 fs::remove_dir_all(&env)
                     .map_err(|error| format!("Unable to reset Python runtime: {error}"))?;

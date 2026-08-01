@@ -16,7 +16,6 @@
     "release:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/publish-release.ps1 -Build"
   },
   "dependencies": {
-    "@google/model-viewer": "4.3.1",
     "@tauri-apps/api": "2.11.0",
     "@tauri-apps/plugin-dialog": "2.7.1",
     "@tauri-apps/plugin-opener": "2.5.4",

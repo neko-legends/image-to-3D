@@ -1,4 +1,3 @@
-import "@google/model-viewer";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -14,6 +13,7 @@ import {
   Layers3,
   Loader2,
   PackageOpen,
+  Pause,
   Play,
   Power,
   RefreshCw,
@@ -27,6 +27,7 @@ import {
   XCircle
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { GltfPreviewViewer, type GltfPreviewAppearance } from "./GltfPreviewViewer";
 import { ObjPreviewViewer } from "./ObjPreviewViewer";
 import { parseVoxelSidecar, VoxelDssViewer, type VoxelSidecar } from "./VoxelDssViewer";
 
@@ -37,49 +38,7 @@ type MeshDetail = "low" | "medium" | "high" | "custom";
 type TrellisPreset = "preview" | "standard" | "quality" | "highpoly" | "custom";
 type QueueStatus = "pending" | "running" | "done" | "error" | "canceled";
 type ActiveAction = "setup" | "generate" | null;
-type PreviewAppearance = "textured" | "clay";
-type PreviewTexture = object;
-type PreviewTextureInfo = {
-  readonly texture: PreviewTexture | null;
-  setTexture: (texture: PreviewTexture | null) => void;
-};
-type PreviewPbrMaterial = {
-  readonly baseColorFactor: Readonly<number[]>;
-  readonly metallicFactor: number;
-  readonly roughnessFactor: number;
-  readonly baseColorTexture: PreviewTextureInfo | null;
-  readonly metallicRoughnessTexture: PreviewTextureInfo | null;
-  setBaseColorFactor: (factor: number[] | string) => void;
-  setMetallicFactor: (factor: number) => void;
-  setRoughnessFactor: (factor: number) => void;
-};
-type PreviewMaterial = {
-  readonly pbrMetallicRoughness: PreviewPbrMaterial;
-  readonly normalTexture: PreviewTextureInfo | null;
-  readonly occlusionTexture: PreviewTextureInfo | null;
-  readonly emissiveTexture: PreviewTextureInfo | null;
-  readonly emissiveFactor: Readonly<number[]>;
-  setEmissiveFactor: (factor: number[] | string) => void;
-};
-type ZoomableModelViewer = HTMLElement & {
-  zoom?: (steps: number) => void;
-  loaded?: boolean;
-  model?: {
-    readonly materials: Readonly<PreviewMaterial[]>;
-  };
-};
-type PreviewMaterialSnapshot = {
-  material: PreviewMaterial;
-  baseColorFactor: number[];
-  metallicFactor: number;
-  roughnessFactor: number;
-  emissiveFactor: number[];
-  baseColorTexture: PreviewTexture | null;
-  metallicRoughnessTexture: PreviewTexture | null;
-  normalTexture: PreviewTexture | null;
-  occlusionTexture: PreviewTexture | null;
-  emissiveTexture: PreviewTexture | null;
-};
+type PreviewAppearance = GltfPreviewAppearance;
 type PreviewTextureStatus = {
   materialCount: number;
   textureCount: number;
@@ -147,6 +106,7 @@ type ImageTo3DOptions = {
   outputDir: string;
   outputName: string;
   meshInputPath: string;
+  modelDir: string;
   recursive: boolean;
   overwrite: boolean;
   meshDetail: MeshDetail;
@@ -396,6 +356,7 @@ const defaultOptions: ImageTo3DOptions = {
   outputDir: "",
   outputName: "",
   meshInputPath: "",
+  modelDir: "",
   recursive: true,
   overwrite: false,
   meshDetail: "low",
@@ -590,6 +551,7 @@ function loadSavedOptions(): ImageTo3DOptions {
       outputDir: coerceString(parsed.outputDir, defaultOptions.outputDir),
       outputName: coerceString(parsed.outputName, defaultOptions.outputName),
       meshInputPath: coerceString(parsed.meshInputPath, defaultOptions.meshInputPath),
+      modelDir: coerceString(parsed.modelDir, defaultOptions.modelDir),
       recursive: coerceBoolean(parsed.recursive, defaultOptions.recursive),
       overwrite: coerceBoolean(parsed.overwrite, defaultOptions.overwrite),
       meshDetail: coerceMeshDetail(parsed.meshDetail, inferredMeshDetail),
@@ -847,66 +809,6 @@ function isTerminalProgressLine(message: string) {
   );
 }
 
-function capturePreviewMaterials(viewer: ZoomableModelViewer) {
-  const snapshots: PreviewMaterialSnapshot[] = [];
-  let textureCount = 0;
-  for (const material of viewer.model?.materials ?? []) {
-    const pbr = material.pbrMetallicRoughness;
-    const snapshot: PreviewMaterialSnapshot = {
-      material,
-      baseColorFactor: [...pbr.baseColorFactor],
-      metallicFactor: pbr.metallicFactor,
-      roughnessFactor: pbr.roughnessFactor,
-      emissiveFactor: [...material.emissiveFactor],
-      baseColorTexture: pbr.baseColorTexture?.texture ?? null,
-      metallicRoughnessTexture: pbr.metallicRoughnessTexture?.texture ?? null,
-      normalTexture: material.normalTexture?.texture ?? null,
-      occlusionTexture: material.occlusionTexture?.texture ?? null,
-      emissiveTexture: material.emissiveTexture?.texture ?? null
-    };
-    textureCount += [
-      snapshot.baseColorTexture,
-      snapshot.metallicRoughnessTexture,
-      snapshot.normalTexture,
-      snapshot.occlusionTexture,
-      snapshot.emissiveTexture
-    ].filter(Boolean).length;
-    snapshots.push(snapshot);
-  }
-  return { snapshots, textureCount };
-}
-
-function applyPreviewAppearance(
-  snapshots: PreviewMaterialSnapshot[],
-  appearance: PreviewAppearance
-) {
-  for (const snapshot of snapshots) {
-    const { material } = snapshot;
-    const pbr = material.pbrMetallicRoughness;
-    if (appearance === "clay") {
-      pbr.baseColorTexture?.setTexture(null);
-      pbr.metallicRoughnessTexture?.setTexture(null);
-      material.normalTexture?.setTexture(null);
-      material.occlusionTexture?.setTexture(null);
-      material.emissiveTexture?.setTexture(null);
-      pbr.setBaseColorFactor("#d8c7b4");
-      pbr.setMetallicFactor(0);
-      pbr.setRoughnessFactor(0.82);
-      material.setEmissiveFactor([0, 0, 0]);
-      continue;
-    }
-    pbr.baseColorTexture?.setTexture(snapshot.baseColorTexture);
-    pbr.metallicRoughnessTexture?.setTexture(snapshot.metallicRoughnessTexture);
-    material.normalTexture?.setTexture(snapshot.normalTexture);
-    material.occlusionTexture?.setTexture(snapshot.occlusionTexture);
-    material.emissiveTexture?.setTexture(snapshot.emissiveTexture);
-    pbr.setBaseColorFactor(snapshot.baseColorFactor);
-    pbr.setMetallicFactor(snapshot.metallicFactor);
-    pbr.setRoughnessFactor(snapshot.roughnessFactor);
-    material.setEmissiveFactor(snapshot.emissiveFactor);
-  }
-}
-
 function App() {
   const devPreviewModel = import.meta.env.DEV
     ? new URLSearchParams(window.location.search).get("preview")
@@ -925,14 +827,11 @@ function App() {
   const queueRef = useRef<QueueItem[]>([]);
   const activeActionRef = useRef<ActiveAction>(null);
   const setupPromptSeenRef = useRef(false);
-  const modelViewerCleanupRef = useRef<(() => void) | null>(null);
-  const modelViewerRef = useRef<ZoomableModelViewer | null>(null);
-  const previewMaterialSnapshotsRef = useRef<PreviewMaterialSnapshot[]>([]);
-  const previewAppearanceRef = useRef<PreviewAppearance>("textured");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [previewModelPath, setPreviewModelPath] = useState<string | null>(null);
   const [previewModelRevision, setPreviewModelRevision] = useState(0);
   const [previewAppearance, setPreviewAppearance] = useState<PreviewAppearance>("textured");
+  const [previewRotating, setPreviewRotating] = useState(true);
   const [previewTextureStatus, setPreviewTextureStatus] = useState<PreviewTextureStatus | null>(null);
   const [previewImages, setPreviewImages] = useState<PreviewImages>({});
   const [modelPreviewError, setModelPreviewError] = useState<string | null>(null);
@@ -988,89 +887,8 @@ function App() {
     : busy
       ? "The mesh preview appears before texturing finishes"
       : "Drop a GLB or OBJ to preview";
-  const bindModelViewer = useCallback((element: HTMLElement | null) => {
-    modelViewerCleanupRef.current?.();
-    modelViewerCleanupRef.current = null;
-    modelViewerRef.current = element as ZoomableModelViewer | null;
-    previewMaterialSnapshotsRef.current = [];
-    if (!element) return;
-
-    const viewer = element as ZoomableModelViewer;
-    let middlePointerId: number | null = null;
-    let previousY = 0;
-    const inspectMaterials = () => {
-      const { snapshots, textureCount } = capturePreviewMaterials(viewer);
-      previewMaterialSnapshotsRef.current = snapshots;
-      setPreviewTextureStatus({
-        materialCount: snapshots.length,
-        textureCount
-      });
-      applyPreviewAppearance(snapshots, previewAppearanceRef.current);
-    };
-    const handleModelError = () => {
-      previewMaterialSnapshotsRef.current = [];
-      setPreviewTextureStatus({ materialCount: 0, textureCount: 0 });
-    };
-
-    const finishMiddleZoom = (event: PointerEvent) => {
-      if (event.pointerId !== middlePointerId) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      if (element.hasPointerCapture(event.pointerId)) {
-        element.releasePointerCapture(event.pointerId);
-      }
-      middlePointerId = null;
-      element.style.cursor = "grab";
-    };
-    const startMiddleZoom = (event: PointerEvent) => {
-      if (event.button !== 1) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      middlePointerId = event.pointerId;
-      previousY = event.clientY;
-      element.setPointerCapture(event.pointerId);
-      element.style.cursor = "ns-resize";
-    };
-    const moveMiddleZoom = (event: PointerEvent) => {
-      if (event.pointerId !== middlePointerId) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      const deltaY = event.clientY - previousY;
-      previousY = event.clientY;
-      if (deltaY !== 0) {
-        viewer.zoom?.(-deltaY / 30);
-      }
-    };
-    const preventMiddleClick = (event: MouseEvent) => {
-      if (event.button !== 1) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    };
-
-    element.addEventListener("pointerdown", startMiddleZoom, true);
-    element.addEventListener("pointermove", moveMiddleZoom, true);
-    element.addEventListener("pointerup", finishMiddleZoom, true);
-    element.addEventListener("pointercancel", finishMiddleZoom, true);
-    element.addEventListener("auxclick", preventMiddleClick, true);
-    element.addEventListener("load", inspectMaterials);
-    element.addEventListener("error", handleModelError);
-    if (viewer.loaded) {
-      inspectMaterials();
-    }
-    modelViewerCleanupRef.current = () => {
-      element.removeEventListener("pointerdown", startMiddleZoom, true);
-      element.removeEventListener("pointermove", moveMiddleZoom, true);
-      element.removeEventListener("pointerup", finishMiddleZoom, true);
-      element.removeEventListener("pointercancel", finishMiddleZoom, true);
-      element.removeEventListener("auxclick", preventMiddleClick, true);
-      element.removeEventListener("load", inspectMaterials);
-      element.removeEventListener("error", handleModelError);
-    };
-  }, []);
   const selectPreviewAppearance = useCallback((appearance: PreviewAppearance) => {
-    previewAppearanceRef.current = appearance;
     setPreviewAppearance(appearance);
-    applyPreviewAppearance(previewMaterialSnapshotsRef.current, appearance);
   }, []);
   const canUseDssPreview = Boolean(voxelSidecar);
   const showDssPreview = Boolean(modelUrl && dssPreviewEnabled && voxelSidecar);
@@ -1088,11 +906,12 @@ function App() {
     if (!isTauriRuntime()) return;
     const status = await invoke<RuntimeStatus>("check_runtime", {
       runtimeProfile: options.runtimeProfile,
-      modelBackend: options.modelBackend
+      modelBackend: options.modelBackend,
+      modelDir: options.modelDir
     });
     setRuntime(status);
     return status;
-  }, [options.modelBackend, options.runtimeProfile]);
+  }, [options.modelBackend, options.modelDir, options.runtimeProfile]);
 
   const refreshVram = useCallback(async () => {
     if (!isTauriRuntime()) return;
@@ -1206,8 +1025,6 @@ function App() {
     (path: string, source: "dropped" | "selected" | "generated" = "selected") => {
       setPreviewModelPath(path);
       setPreviewModelRevision((current) => current + 1);
-      previewAppearanceRef.current = "textured";
-      previewMaterialSnapshotsRef.current = [];
       setPreviewAppearance("textured");
       setPreviewTextureStatus(null);
       setModelPreviewError(null);
@@ -1510,6 +1327,13 @@ function App() {
     }
   }, []);
 
+  const chooseModelDir = useCallback(async () => {
+    const selected = await openDialog({ directory: true, multiple: false });
+    if (typeof selected === "string") {
+      setOptions((current) => ({ ...current, modelDir: selected }));
+    }
+  }, []);
+
   const resetPythonRuntime = useCallback(async () => {
     if (!isTauriRuntime() || busy) return;
     const confirmed = window.confirm(
@@ -1786,6 +1610,19 @@ function App() {
                 onChange={(event) => setOptions((current) => ({ ...current, overwrite: event.target.checked }))}
               />
               <span>Overwrite outputs</span>
+            </label>
+            <label
+              className="toggle"
+              title="Blender-style smooth shading in the preview, Hunyuan texture conditioning, and exported GLB"
+            >
+              <input
+                type="checkbox"
+                checked={options.smoothNormals}
+                onChange={(event) =>
+                  setOptions((current) => ({ ...current, smoothNormals: event.target.checked }))
+                }
+              />
+              <span>Shade smooth (preview + texture/export)</span>
             </label>
             <label className="toggle">
               <input
@@ -2545,6 +2382,15 @@ function App() {
                 {selectedModel ? (
                   <div className="preview-actions">
                     <button
+                      className={`secondary preview-toggle ${previewRotating ? "active" : ""}`}
+                      disabled={!modelUrl}
+                      onClick={() => setPreviewRotating((rotating) => !rotating)}
+                      title={previewRotating ? "Stop automatic rotation" : "Start automatic rotation"}
+                    >
+                      {previewRotating ? <Pause size={15} /> : <Play size={15} />}
+                      {previewRotating ? "Pause" : "Rotate"}
+                    </button>
+                    <button
                       className={`secondary preview-toggle ${previewAppearance === "textured" ? "active" : ""}`}
                       disabled={!modelUrl || previewTextureStatus?.textureCount === 0}
                       onClick={() => selectPreviewAppearance("textured")}
@@ -2562,41 +2408,52 @@ function App() {
                       <Box size={15} />
                       Clay
                     </button>
-                    <button
-                      className={`secondary preview-toggle ${showDssPreview ? "active" : ""}`}
-                      disabled={!canUseDssPreview}
-                      onClick={() => setDssPreviewEnabled((enabled) => !enabled)}
-                      title={canUseDssPreview ? "Toggle DSS lighting" : "DSS lighting is available for voxel-style outputs"}
-                    >
-                      <Sun size={15} />
-                      DSS
-                    </button>
+                    {!isObjModelFile(selectedModel) ? (
+                      <button
+                        className={`secondary preview-toggle ${previewAppearance === "cel" ? "active" : ""}`}
+                        disabled={!modelUrl}
+                        onClick={() => selectPreviewAppearance("cel")}
+                        title="Show banded toon shading with smooth normals, rim light, and silhouette outline"
+                      >
+                        <WandSparkles size={15} />
+                        Cel
+                      </button>
+                    ) : null}
+                    {canUseDssPreview ? (
+                      <button
+                        className={`secondary preview-toggle ${showDssPreview ? "active" : ""}`}
+                        onClick={() => setDssPreviewEnabled((enabled) => !enabled)}
+                        title="Toggle the voxel DSS preview"
+                      >
+                        <Sun size={15} />
+                        Voxel DSS
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
               <div className="model-frame">
                 {showDssPreview && voxelSidecar ? (
-                  <VoxelDssViewer sidecar={voxelSidecar} autoRotate={!busy} />
+                  <VoxelDssViewer sidecar={voxelSidecar} autoRotate={previewRotating && !busy} />
                 ) : modelUrl && selectedModel && isObjModelFile(selectedModel) ? (
                   <ObjPreviewViewer
                     key={modelUrl}
                     modelUrl={modelUrl}
-                    autoRotate={!busy}
-                    appearance={previewAppearance}
+                    autoRotate={previewRotating && !busy}
+                    smoothNormals={options.smoothNormals}
+                    appearance={previewAppearance === "cel" ? "textured" : previewAppearance}
                     onTextureStatus={setPreviewTextureStatus}
                     onError={setModelPreviewError}
                   />
                 ) : modelUrl ? (
-                  <model-viewer
+                  <GltfPreviewViewer
                     key={modelUrl}
-                    ref={bindModelViewer}
-                    src={modelUrl}
-                    camera-controls
-                    auto-rotate={!busy}
-                    rotation-per-second="28deg"
-                    shadow-intensity="0.8"
-                    exposure="1"
-                    title="Left drag to orbit. Middle drag or mouse wheel to zoom."
+                    modelUrl={modelUrl}
+                    autoRotate={previewRotating && !busy}
+                    smoothNormals={options.smoothNormals}
+                    appearance={previewAppearance}
+                    onTextureStatus={setPreviewTextureStatus}
+                    onError={setModelPreviewError}
                   />
                 ) : (
                   <div className="preview-empty">
@@ -2961,6 +2818,31 @@ function App() {
                   </select>
                 </label>
               </div>
+              <div className="path-row setup-model-path">
+                <label className="field">
+                  <span>Model storage</span>
+                  <input
+                    value={options.modelDir}
+                    disabled={busy}
+                    placeholder={runtime?.modelDir ?? "Default shared store (keeps models across updates)"}
+                    onChange={(event) =>
+                      setOptions((current) => ({ ...current, modelDir: event.target.value }))
+                    }
+                  />
+                </label>
+                <button
+                  className="secondary icon small-icon"
+                  onClick={chooseModelDir}
+                  disabled={busy}
+                  title="Choose where downloaded model files are stored"
+                >
+                  <FolderOpen size={16} />
+                </button>
+              </div>
+              <p className="setup-hint">
+                Where downloaded model files are stored. Leave blank for the shared store, or pick a folder
+                on a roomy drive. Keep it stable across updates to avoid re-downloading.
+              </p>
               {shouldRecommendCu128 && rtx50RecommendationGpu ? (
                 <div className="runtime-recommendation setup-recommendation">
                   <span>

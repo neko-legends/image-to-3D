@@ -12,9 +12,28 @@ TripoSplat, and TRELLIS.2.
 
 ## Example Output
 
-![Clay preview of a cat wearing a witch hat, generated as a 9k-triangle mesh](assets/cat-in-hat-9k-triangles.png)
+| Shade smooth off | Shade smooth on |
+| --- | --- |
+| ![Faceted clay preview of a cat wearing a witch hat](assets/cat-in-hat-9k-triangles.png) | ![Smooth-shaded clay preview of the same cat wearing a witch hat](assets/cat-in-hat-9k-shade-smooth.png) |
+| Original face shading exposes the low-poly facets. | Blender-style vertex-normal shading softens the surface without increasing the polygon count. |
 
-*Clay preview of a generated mesh with approximately 9k triangles.*
+*Both previews use the same generated mesh with approximately 9k triangles.*
+
+### Textured Cel Preview
+
+![Image To 3D desktop UI showing the textured Cel preview of a 9k-face cat mesh](assets/cat-in-hat-cel-preview-ui.png)
+
+*A 9k-face Hunyuan3D mesh shown in the built-in Three.js viewer with smooth
+normals, four-band Cel lighting, rim light, and ink-style contours.*
+
+<p align="center">
+  <img src="assets/cat-in-hat-cel-preview-rear.png"
+       alt="Rear view of the textured Cel-shaded cat and witch hat"
+       width="534">
+</p>
+
+*Rear detail showing how the Cel shader preserves the generated color texture
+while simplifying the lighting and outlining the silhouette.*
 
 The app is designed for NVIDIA GPUs. Hunyuan3D and TRELLIS.2 are large CUDA
 workloads, and TripoSplat is also GPU-oriented; CPU generation is not a
@@ -50,7 +69,11 @@ Use the app like a normal desktop tool.
    OBJ uses separate sidecar files: keep its `.mtl` and referenced JPG/PNG
    textures beside the `.obj`. The app loads the matching MTL and base-color
    texture automatically and lets you switch the preview between `Textured`
-   and `Clay`.
+   and `Clay`. GLB previews also offer `Cel`, which uses smooth normals, stepped
+   lighting, rim light, and silhouette contours. Use `Pause`/`Rotate` to stop
+   or resume the turntable. `Shade smooth (preview + texture/export)` updates
+   the viewer immediately, uses smooth vertex-normal conditioning during
+   Hunyuan texturing, and writes recalculated normals into generated GLBs.
 
 4. Pick the CUDA GPU and PyTorch runtime in the Runtime panel if you have more
    than one NVIDIA GPU.
@@ -384,6 +407,7 @@ Common options:
 - `numChunks`
 - `reduceFaces`
 - `maxFaces`
+- `smoothNormals`
 - `textureViewSize`
 - `textureSteps`
 - `textureGuidance`

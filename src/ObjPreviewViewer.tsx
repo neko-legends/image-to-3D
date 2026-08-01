@@ -16,6 +16,7 @@ import {
 import { MTLLoader } from "three/examples/jsm/loaders/MTLLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { createSmoothNormalsGeometry } from "./smoothNormals";
 
 type SurfaceMaterial = Material & {
   color?: Color;
@@ -31,6 +32,7 @@ type SurfaceSnapshot = {
 type ObjPreviewViewerProps = {
   modelUrl: string;
   autoRotate: boolean;
+  smoothNormals: boolean;
   appearance: "textured" | "clay";
   onTextureStatus: (status: { materialCount: number; textureCount: number }) => void;
   onError: (message: string | null) => void;
@@ -77,6 +79,7 @@ function applyAppearance(snapshots: SurfaceSnapshot[], appearance: "textured" | 
 export function ObjPreviewViewer({
   modelUrl,
   autoRotate,
+  smoothNormals,
   appearance,
   onTextureStatus,
   onError
@@ -84,7 +87,11 @@ export function ObjPreviewViewer({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const appearanceRef = useRef(appearance);
   const autoRotateRef = useRef(autoRotate);
+  const smoothNormalsRef = useRef(smoothNormals);
   const snapshotsRef = useRef<SurfaceSnapshot[]>([]);
+  const meshGeometriesRef = useRef<
+    Array<{ mesh: Mesh; original: Mesh["geometry"]; smooth: Mesh["geometry"] }>
+  >([]);
 
   useEffect(() => {
     appearanceRef.current = appearance;
@@ -96,12 +103,20 @@ export function ObjPreviewViewer({
   }, [autoRotate]);
 
   useEffect(() => {
+    smoothNormalsRef.current = smoothNormals;
+    for (const entry of meshGeometriesRef.current) {
+      entry.mesh.geometry = smoothNormals ? entry.smooth : entry.original;
+    }
+  }, [smoothNormals]);
+
+  useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     let disposed = false;
     let frame = 0;
     let loadedObject: Object3D | null = null;
     snapshotsRef.current = [];
+    meshGeometriesRef.current = [];
     onTextureStatus({ materialCount: 0, textureCount: 0 });
     onError(null);
 
@@ -147,6 +162,17 @@ export function ObjPreviewViewer({
       const size = box.getSize(new Vector3());
       object.position.sub(center);
       scene.add(object);
+
+      object.traverse((node) => {
+        if (!(node instanceof Mesh)) return;
+        const entry = {
+          mesh: node,
+          original: node.geometry,
+          smooth: createSmoothNormalsGeometry(node.geometry)
+        };
+        node.geometry = smoothNormalsRef.current ? entry.smooth : entry.original;
+        meshGeometriesRef.current.push(entry);
+      });
 
       const largestSide = Math.max(0.01, size.x, size.y, size.z);
       camera.near = Math.max(0.001, largestSide / 200);
@@ -210,13 +236,16 @@ export function ObjPreviewViewer({
       const textures = new Set<Texture>();
       loadedObject?.traverse((node) => {
         if (!(node instanceof Mesh)) return;
-        node.geometry.dispose();
         for (const material of materialList(node.material)) {
           materials.add(material);
           const map = (material as SurfaceMaterial).map;
           if (map) textures.add(map);
         }
       });
+      for (const entry of meshGeometriesRef.current) {
+        entry.original.dispose();
+        entry.smooth.dispose();
+      }
       for (const snapshot of snapshotsRef.current) {
         if (snapshot.map) textures.add(snapshot.map);
       }
@@ -225,6 +254,7 @@ export function ObjPreviewViewer({
       renderer.dispose();
       renderer.domElement.remove();
       snapshotsRef.current = [];
+      meshGeometriesRef.current = [];
     };
   }, [modelUrl, onError, onTextureStatus]);
 
