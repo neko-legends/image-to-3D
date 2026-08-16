@@ -23,7 +23,9 @@ use std::os::unix::process::CommandExt;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+mod autoremesher;
 mod neko_store;
+use autoremesher::{ActiveRemeshState, RemeshOptions, RemeshResult, RemesherStatus};
 use neko_store::NekoStore;
 
 const IMAGE_EXTENSIONS: &[&str] = &[
@@ -1988,6 +1990,43 @@ fn preview_image_data_url(path: String) -> Result<String, String> {
     ))
 }
 
+#[tauri::command]
+fn get_autoremesher_status(app: AppHandle) -> Result<RemesherStatus, String> {
+    Ok(autoremesher::status(&app_data_dir(&app)?))
+}
+
+#[tauri::command]
+async fn install_autoremesher(app: AppHandle) -> Result<RemesherStatus, String> {
+    let app_data = app_data_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || autoremesher::install(&app_data))
+        .await
+        .map_err(|error| format!("AutoRemesher installer task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn run_autoremesher(
+    app: AppHandle,
+    active_jobs: State<'_, ActiveJobState>,
+    active_remesh: State<'_, ActiveRemeshState>,
+    options: RemeshOptions,
+) -> Result<RemeshResult, String> {
+    if active_jobs.is_busy()? {
+        return Err("Wait for the current generation job to finish before remeshing.".to_string());
+    }
+    let app_data = app_data_dir(&app)?;
+    let remesh_state = active_remesh.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        autoremesher::run(&app_data, &remesh_state, options)
+    })
+    .await
+    .map_err(|error| format!("AutoRemesher task failed: {error}"))?
+}
+
+#[tauri::command]
+fn cancel_autoremesher(active_remesh: State<'_, ActiveRemeshState>) -> Result<(), String> {
+    active_remesh.cancel()
+}
+
 fn preview_thumbnail_data_url(image_path: &Path) -> Result<String, String> {
     let image = image::ImageReader::open(image_path)
         .map_err(|error| format!("Unable to open preview image: {error}"))?
@@ -3228,6 +3267,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(ActiveJobState::default())
         .manage(ManagedWorkerState::default())
+        .manage(ActiveRemeshState::default())
         .manage(AgentServerState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -3261,13 +3301,18 @@ pub fn run() {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                 let managed_workers = window.state::<ManagedWorkerState>();
                 let _ = managed_workers.stop();
+                let active_remesh = window.state::<ActiveRemeshState>();
+                let _ = active_remesh.cancel();
             }
         })
         .invoke_handler(tauri::generate_handler![
             cancel_active_job,
+            cancel_autoremesher,
             check_runtime,
             get_agent_server_status,
+            get_autoremesher_status,
             get_vram_status,
+            install_autoremesher,
             list_job_history,
             open_containing_folder,
             open_output_folder,
@@ -3278,6 +3323,7 @@ pub fn run() {
             read_voxel_sidecar,
             reset_python_runtime,
             resolve_inputs,
+            run_autoremesher,
             set_agent_server_enabled,
             start_generation_job,
             unload_models

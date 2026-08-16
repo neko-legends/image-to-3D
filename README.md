@@ -52,7 +52,7 @@ Use the app like a normal desktop tool.
    Or run the installer:
 
    ```text
-   release\installer\Image To 3D_26.7.29_x64-setup.exe
+   release\installer\Image To 3D_26.8.16_x64-setup.exe
    ```
 
 2. On first launch, the app checks what is already installed. If setup is
@@ -141,7 +141,15 @@ Use the app like a normal desktop tool.
    normalized to opaque materials and receive configurable UV-atlas gutter
    padding to reduce transparency artifacts and dark seams.
 
-8. Generated GLBs go into an `output` folder beside the running app by default.
+8. After generating or loading a `.glb`, `.gltf`, or `.obj`, open `Remesh` in the
+   3D Preview to create clean quad topology with AutoRemesher. The first use asks
+   before downloading the pinned AutoRemesher 1.1.0 Windows release and verifies
+   its checksum. Target quads, edge scaling, sharp-edge angle, smooth-normal
+   angle, adaptivity, and anisotropy are configurable. The original model is
+   preserved; the geometry-only remeshed OBJ and a report are written beside it,
+   and the 3D Preview switches to the new OBJ when processing finishes.
+
+9. Generated GLBs go into an `output` folder beside the running app by default.
    If you choose a different output folder, the app remembers it.
 
 ### Hunyuan performance and VRAM guidance
@@ -291,7 +299,7 @@ npm run release:build
 Release outputs:
 
 - `release\portable\image-to-3d.exe`
-- `release\installer\Image To 3D_26.7.29_x64-setup.exe`
+- `release\installer\Image To 3D_26.8.16_x64-setup.exe`
 
 ### Headless Runner
 
