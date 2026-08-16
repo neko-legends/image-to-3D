@@ -5,6 +5,8 @@ import { getCurrentWindow, PhysicalSize } from "@tauri-apps/api/window";
 import {
   Box,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clock3,
   Cpu,
   Download,
@@ -12,6 +14,7 @@ import {
   Image,
   Layers3,
   Loader2,
+  Network,
   PackageOpen,
   Pause,
   Play,
@@ -37,11 +40,34 @@ type SeedMode = "fixed" | "randomize";
 type MeshDetail = "low" | "medium" | "high" | "custom";
 type TrellisPreset = "preview" | "standard" | "quality" | "highpoly" | "custom";
 type QueueStatus = "pending" | "running" | "done" | "error" | "canceled";
-type ActiveAction = "setup" | "generate" | null;
+type ActiveAction = "setup" | "generate" | "installRemesher" | "remesh" | null;
 type PreviewAppearance = GltfPreviewAppearance;
 type PreviewTextureStatus = {
   materialCount: number;
   textureCount: number;
+};
+
+type RemesherStatus = {
+  supported: boolean;
+  installed: boolean;
+  version: string;
+  executablePath: string | null;
+  message: string;
+};
+
+type RemesherSettings = {
+  targetQuads: number;
+  edgeScaling: number;
+  sharpEdge: number;
+  smoothNormal: number;
+  adaptivity: number;
+  anisotropy: number;
+};
+
+type RemeshResult = {
+  outputPath: string;
+  reportPath: string;
+  message: string;
 };
 
 type RuntimeStatus = {
@@ -211,7 +237,7 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.7.29";
+const APP_VERSION = "v26.8.16";
 const SETTINGS_STORAGE_KEY = "imageTo3D.settings.v3";
 const PREVIOUS_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v2";
 const OLDER_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v1";
@@ -221,7 +247,17 @@ const AGENT_STORAGE_KEY = "imageTo3D.agentControlEnabled.v1";
 const LEGACY_AGENT_STORAGE_KEY = "imageToHunyuan3D.agentControlEnabled.v1";
 const AGENT_PORT_STORAGE_KEY = "imageTo3D.agentApiPort.v1";
 const LEGACY_AGENT_PORT_STORAGE_KEY = "imageToHunyuan3D.agentApiPort.v1";
+const REMESHER_SETTINGS_STORAGE_KEY = "imageTo3D.autoremesherSettings.v1";
 const DEFAULT_AGENT_API_PORT = 17333;
+
+const defaultRemesherSettings: RemesherSettings = {
+  targetQuads: 50000,
+  edgeScaling: 1,
+  sharpEdge: 90,
+  smoothNormal: 0,
+  adaptivity: 1,
+  anisotropy: 1
+};
 
 const backendLabels: Record<ModelBackend, string> = {
   hunyuan: "Hunyuan3D 2.1",
@@ -419,6 +455,7 @@ const isTauriRuntime = () => "__TAURI_INTERNALS__" in window || "__TAURI__" in w
 const fileName = (path: string) => path.split(/[\\/]/).pop() ?? path;
 const isModelFile = (path: string) => /\.(glb|gltf|obj|ply)$/i.test(path);
 const isPreviewableModelFile = (path: string) => /\.(glb|gltf|obj)$/i.test(path);
+const isRemeshableModelFile = (path: string) => /\.(glb|gltf|obj)$/i.test(path);
 const isObjModelFile = (path: string) => /\.obj$/i.test(path);
 const isPreviewableImage = (path: string) => /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(path);
 const isTemporaryJobOutput = (path: string) => /[\\/]jobs[\\/]/i.test(path);
@@ -504,6 +541,25 @@ function withCustomTrellisSettings(
   changes: Partial<ImageTo3DOptions>
 ): ImageTo3DOptions {
   return { ...options, ...changes, trellisPreset: "custom" };
+}
+
+function loadRemesherSettings(): RemesherSettings {
+  if (typeof window === "undefined") return defaultRemesherSettings;
+  try {
+    const raw = window.localStorage.getItem(REMESHER_SETTINGS_STORAGE_KEY);
+    if (!raw) return defaultRemesherSettings;
+    const parsed = JSON.parse(raw) as Partial<RemesherSettings>;
+    return {
+      targetQuads: coerceNumber(parsed.targetQuads, defaultRemesherSettings.targetQuads, 100, 10000000),
+      edgeScaling: coerceNumber(parsed.edgeScaling, defaultRemesherSettings.edgeScaling, 1, 4),
+      sharpEdge: coerceNumber(parsed.sharpEdge, defaultRemesherSettings.sharpEdge, 30, 180),
+      smoothNormal: coerceNumber(parsed.smoothNormal, defaultRemesherSettings.smoothNormal, 0, 180),
+      adaptivity: coerceNumber(parsed.adaptivity, defaultRemesherSettings.adaptivity, 0, 1),
+      anisotropy: coerceNumber(parsed.anisotropy, defaultRemesherSettings.anisotropy, 0, 1)
+    };
+  } catch {
+    return defaultRemesherSettings;
+  }
 }
 
 function loadSavedOptions(): ImageTo3DOptions {
@@ -826,6 +882,7 @@ function App() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const queueRef = useRef<QueueItem[]>([]);
   const activeActionRef = useRef<ActiveAction>(null);
+  const remeshCancelRequestedRef = useRef(false);
   const setupPromptSeenRef = useRef(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [previewModelPath, setPreviewModelPath] = useState<string | null>(null);
@@ -833,6 +890,10 @@ function App() {
   const [previewAppearance, setPreviewAppearance] = useState<PreviewAppearance>("textured");
   const [previewRotating, setPreviewRotating] = useState(true);
   const [previewTextureStatus, setPreviewTextureStatus] = useState<PreviewTextureStatus | null>(null);
+  const [showRemesher, setShowRemesher] = useState(false);
+  const [remesherStatus, setRemesherStatus] = useState<RemesherStatus | null>(null);
+  const [remesherSettings, setRemesherSettings] = useState<RemesherSettings>(loadRemesherSettings);
+  const [lastRemeshResult, setLastRemeshResult] = useState<RemeshResult | null>(null);
   const [previewImages, setPreviewImages] = useState<PreviewImages>({});
   const [modelPreviewError, setModelPreviewError] = useState<string | null>(null);
   const [voxelSidecar, setVoxelSidecar] = useState<VoxelSidecar | null>(null);
@@ -897,6 +958,10 @@ function App() {
     if (options.modelBackend === "hunyuan" && options.mode === "textureOnly" && !options.meshInputPath) return false;
     return true;
   }, [busy, options.meshInputPath, options.mode, options.modelBackend, queue.length]);
+  const canRemesh = Boolean(
+    !busy && selectedModel && isRemeshableModelFile(selectedModel) && remesherStatus?.installed
+  );
+  const currentActionCanCancel = activeActionRef.current === "generate" || activeActionRef.current === "remesh";
 
   const pushLog = useCallback((line: string) => {
     setLog((current) => [line, ...current].slice(0, 120));
@@ -916,6 +981,13 @@ function App() {
   const refreshVram = useCallback(async () => {
     if (!isTauriRuntime()) return;
     setVram(await invoke<VramStatus>("get_vram_status"));
+  }, []);
+
+  const refreshRemesherStatus = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    const status = await invoke<RemesherStatus>("get_autoremesher_status");
+    setRemesherStatus(status);
+    return status;
   }, []);
 
   const refreshJobHistory = useCallback(async () => {
@@ -1028,6 +1100,9 @@ function App() {
       setPreviewAppearance("textured");
       setPreviewTextureStatus(null);
       setModelPreviewError(null);
+      if (source !== "generated") {
+        setLastRemeshResult(null);
+      }
       setHeadline(`Previewing ${fileName(path)}`);
       if (source === "dropped") {
         pushLog(`Previewing dropped model: ${path}`);
@@ -1058,6 +1133,10 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(options));
   }, [options]);
+
+  useEffect(() => {
+    window.localStorage.setItem(REMESHER_SETTINGS_STORAGE_KEY, JSON.stringify(remesherSettings));
+  }, [remesherSettings]);
 
   useEffect(() => {
     const updateScale = async () => {
@@ -1092,7 +1171,8 @@ function App() {
     void refreshVram().catch((error) => pushLog(`VRAM check failed: ${String(error)}`));
     void refreshAgentStatus().catch((error) => pushLog(`Agent API check failed: ${String(error)}`));
     void refreshJobHistory().catch((error) => pushLog(`Job history check failed: ${String(error)}`));
-  }, [pushLog, refreshAgentStatus, refreshJobHistory, refreshRuntime, refreshVram]);
+    void refreshRemesherStatus().catch((error) => pushLog(`AutoRemesher check failed: ${String(error)}`));
+  }, [pushLog, refreshAgentStatus, refreshJobHistory, refreshRemesherStatus, refreshRuntime, refreshVram]);
 
   useEffect(() => {
     if (!isTauriRuntime() || !agentControlEnabled) return;
@@ -1389,6 +1469,7 @@ function App() {
     setPreviewTextureStatus(null);
     setModelPreviewError(null);
     setPreviewImages({});
+    setLastRemeshResult(null);
     setHeadline("Prepare runtime or drop files");
   }, []);
 
@@ -1397,6 +1478,7 @@ function App() {
     setShowSetupPrompt(false);
     setBusy(true);
     setCanceling(false);
+    setLastRemeshResult(null);
     activeActionRef.current = "setup";
     setHeadline(`Preparing ${selectedBackendLabel}`);
     try {
@@ -1418,6 +1500,7 @@ function App() {
     }
     setBusy(true);
     setCanceling(false);
+    setLastRemeshResult(null);
     activeActionRef.current = "generate";
     const startingMessage = runtimeReady(runtime, options)
       ? `Loading ${selectedBackendLabel} model`
@@ -1452,6 +1535,72 @@ function App() {
     }
   }, [canStart, options, pushLog, runtime, selectedBackendLabel]);
 
+  const installRemesher = useCallback(async () => {
+    if (!isTauriRuntime() || busy) return;
+    setBusy(true);
+    setCanceling(false);
+    activeActionRef.current = "installRemesher";
+    setHeadline("Installing AutoRemesher 1.1.0");
+    pushLog("Downloading and verifying AutoRemesher 1.1.0...");
+    try {
+      const status = await invoke<RemesherStatus>("install_autoremesher");
+      setRemesherStatus(status);
+      setHeadline("AutoRemesher is ready");
+      pushLog(status.message);
+    } catch (error) {
+      setHeadline("AutoRemesher install failed");
+      pushLog(String(error));
+    } finally {
+      setBusy(false);
+      activeActionRef.current = null;
+    }
+  }, [busy, pushLog]);
+
+  const runRemesher = useCallback(async () => {
+    if (!canRemesh || !selectedModel || !isTauriRuntime()) return;
+    setBusy(true);
+    setCanceling(false);
+    setLastRemeshResult(null);
+    remeshCancelRequestedRef.current = false;
+    activeActionRef.current = "remesh";
+    setHeadline(`Remeshing ${fileName(selectedModel)}`);
+    pushLog(`AutoRemesher started: ${selectedModel}`);
+    try {
+      const result = await invoke<RemeshResult>("run_autoremesher", {
+        options: { inputPath: selectedModel, ...remesherSettings }
+      });
+      setLastRemeshResult(result);
+      previewModel(result.outputPath, "generated");
+      setPreviewAppearance("clay");
+      if (selectedItem) {
+        setQueue((current) =>
+          current.map((item) =>
+            item.path === selectedItem.path
+              ? {
+                  ...item,
+                  outputHistory: [result.outputPath, result.reportPath, ...(item.outputHistory ?? [])]
+                }
+              : item
+          )
+        );
+      }
+      setHeadline(`Remeshed ${fileName(result.outputPath)}`);
+      pushLog(`${result.message}: ${result.outputPath}`);
+    } catch (error) {
+      if (remeshCancelRequestedRef.current) {
+        setHeadline("Remesh canceled");
+        pushLog("AutoRemesher canceled.");
+      } else {
+        setHeadline("Remesh failed");
+        pushLog(String(error));
+      }
+    } finally {
+      setBusy(false);
+      setCanceling(false);
+      activeActionRef.current = null;
+    }
+  }, [canRemesh, previewModel, pushLog, remesherSettings, selectedItem, selectedModel]);
+
   const cancelActiveJob = useCallback(async () => {
     if (!isTauriRuntime()) return;
     setCanceling(true);
@@ -1462,6 +1611,23 @@ function App() {
       pushLog(String(error));
     }
   }, [pushLog]);
+
+  const cancelCurrentAction = useCallback(async () => {
+    if (activeActionRef.current !== "remesh") {
+      await cancelActiveJob();
+      return;
+    }
+    if (!isTauriRuntime()) return;
+    setCanceling(true);
+    remeshCancelRequestedRef.current = true;
+    try {
+      await invoke("cancel_autoremesher");
+    } catch (error) {
+      setCanceling(false);
+      remeshCancelRequestedRef.current = false;
+      pushLog(String(error));
+    }
+  }, [cancelActiveJob, pushLog]);
 
   const openContainingFolder = useCallback(
     async (path: string) => {
@@ -2300,7 +2466,7 @@ function App() {
                 {busy && activeActionRef.current === "generate" ? <Loader2 className="spin" size={17} /> : <Play size={17} />}
                 Generate
               </button>
-              <button className="secondary" disabled={!busy || canceling} onClick={cancelActiveJob}>
+              <button className="secondary" disabled={!busy || !currentActionCanCancel || canceling} onClick={cancelCurrentAction}>
                 {canceling ? <Loader2 className="spin" size={17} /> : <Square size={17} />}
                 Cancel
               </button>
@@ -2382,6 +2548,16 @@ function App() {
                 {selectedModel ? (
                   <div className="preview-actions">
                     <button
+                      className={`secondary preview-toggle ${showRemesher ? "active" : ""}`}
+                      disabled={!isRemeshableModelFile(selectedModel)}
+                      onClick={() => setShowRemesher((visible) => !visible)}
+                      title="Create clean quad topology with AutoRemesher"
+                    >
+                      <Network size={15} />
+                      Remesh
+                      {showRemesher ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                    </button>
+                    <button
                       className={`secondary preview-toggle ${previewRotating ? "active" : ""}`}
                       disabled={!modelUrl}
                       onClick={() => setPreviewRotating((rotating) => !rotating)}
@@ -2432,7 +2608,7 @@ function App() {
                   </div>
                 ) : null}
               </div>
-              <div className="model-frame">
+              <div className={`model-frame ${showRemesher ? "remesher-open" : ""}`}>
                 {showDssPreview && voxelSidecar ? (
                   <VoxelDssViewer sidecar={voxelSidecar} autoRotate={previewRotating && !busy} />
                 ) : modelUrl && selectedModel && isObjModelFile(selectedModel) ? (
@@ -2462,6 +2638,147 @@ function App() {
                   </div>
                 )}
               </div>
+              {showRemesher && selectedModel ? (
+                <section className="remesher-panel" aria-label="AutoRemesher settings">
+                  <div className="remesher-heading">
+                    <div>
+                      <strong>AutoRemesher</strong>
+                      <small>Clean quad topology · geometry-only OBJ output</small>
+                    </div>
+                    <span className={remesherStatus?.installed ? "remesher-ready" : "remesher-needed"}>
+                      {remesherStatus?.installed
+                        ? `v${remesherStatus.version} ready`
+                        : remesherStatus
+                          ? "Setup needed"
+                          : "Checking setup"}
+                    </span>
+                  </div>
+                  <small className="remesher-source" title={selectedModel}>
+                    Source: {fileName(selectedModel)}
+                  </small>
+                  <div className="remesher-settings">
+                    <label className="field">
+                      <span>Target quads</span>
+                      <input
+                        type="number"
+                        min="100"
+                        max="10000000"
+                        step="100"
+                        value={remesherSettings.targetQuads}
+                        disabled={busy}
+                        onChange={(event) =>
+                          setRemesherSettings((current) => ({
+                            ...current,
+                            targetQuads: Number(event.target.value)
+                          }))
+                        }
+                      />
+                    </label>
+                    <label className="field" title="Scales the target edge length; higher values create coarser regions">
+                      <span>Edge scaling</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="4"
+                        step="0.1"
+                        value={remesherSettings.edgeScaling}
+                        disabled={busy}
+                        onChange={(event) =>
+                          setRemesherSettings((current) => ({ ...current, edgeScaling: Number(event.target.value) }))
+                        }
+                      />
+                    </label>
+                    <label className="field" title="Dihedral angle treated as a sharp feature">
+                      <span>Sharp edge °</span>
+                      <input
+                        type="number"
+                        min="30"
+                        max="180"
+                        step="1"
+                        value={remesherSettings.sharpEdge}
+                        disabled={busy}
+                        onChange={(event) =>
+                          setRemesherSettings((current) => ({ ...current, sharpEdge: Number(event.target.value) }))
+                        }
+                      />
+                    </label>
+                    <label className="field" title="Normal-angle threshold used when smoothing the input surface">
+                      <span>Smooth normal °</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="180"
+                        step="1"
+                        value={remesherSettings.smoothNormal}
+                        disabled={busy}
+                        onChange={(event) =>
+                          setRemesherSettings((current) => ({ ...current, smoothNormal: Number(event.target.value) }))
+                        }
+                      />
+                    </label>
+                    <label className="field" title="0 is uniform density; 1 puts finer quads in high-curvature areas">
+                      <span>Adaptivity</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={remesherSettings.adaptivity}
+                        disabled={busy}
+                        onChange={(event) =>
+                          setRemesherSettings((current) => ({ ...current, adaptivity: Number(event.target.value) }))
+                        }
+                      />
+                    </label>
+                    <label className="field" title="0 favors square quads; 1 stretches quads along flatter directions">
+                      <span>Anisotropy</span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={remesherSettings.anisotropy}
+                        disabled={busy}
+                        onChange={(event) =>
+                          setRemesherSettings((current) => ({ ...current, anisotropy: Number(event.target.value) }))
+                        }
+                      />
+                    </label>
+                  </div>
+                  <div className="remesher-footer">
+                    <small>
+                      {remesherStatus?.message ??
+                        (isTauriRuntime() ? "Checking the managed tool install..." : "Run the desktop app to install and remesh.")}
+                    </small>
+                    {remesherStatus && !remesherStatus.installed ? (
+                      <button
+                        className="secondary remesher-run"
+                        disabled={busy || !remesherStatus.supported}
+                        onClick={() => void installRemesher()}
+                      >
+                        {busy && activeActionRef.current === "installRemesher" ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
+                        Install v{remesherStatus.version}
+                      </button>
+                    ) : (
+                      <button className="primary remesher-run" disabled={!canRemesh} onClick={() => void runRemesher()}>
+                        {busy && activeActionRef.current === "remesh" ? <Loader2 className="spin" size={15} /> : <Network size={15} />}
+                        Remesh model
+                      </button>
+                    )}
+                  </div>
+                  {lastRemeshResult ? (
+                    <button
+                      className="remesher-result"
+                      onClick={() => void openContainingFolder(lastRemeshResult.outputPath)}
+                      title="Open the remeshed model folder"
+                    >
+                      <CheckCircle2 size={15} />
+                      <span>{fileName(lastRemeshResult.outputPath)}</span>
+                      <FolderOpen size={14} />
+                    </button>
+                  ) : null}
+                </section>
+              ) : null}
               {previewImages.error || voxelPreviewError || modelPreviewError ? (
                 <small className="preview-error">
                   {previewImages.error ?? voxelPreviewError ?? modelPreviewError}
