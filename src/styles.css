@@ -690,6 +690,10 @@ button:disabled {
   overflow: hidden;
 }
 
+.model-frame.remesher-open {
+  aspect-ratio: 16 / 9;
+}
+
 .dss-viewer,
 .dss-canvas,
 .gltf-preview-viewer,
@@ -734,6 +738,118 @@ button:disabled {
   display: block;
   margin-top: 8px;
   color: #ff766c;
+}
+
+.remesher-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+  border: 1px solid rgba(43, 212, 191, 0.24);
+  border-radius: 7px;
+  background:
+    linear-gradient(135deg, rgba(43, 212, 191, 0.08), rgba(255, 145, 47, 0.05)),
+    rgba(6, 8, 7, 0.88);
+  padding: 11px;
+}
+
+.remesher-heading,
+.remesher-footer,
+.remesher-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.remesher-heading {
+  justify-content: space-between;
+}
+
+.remesher-heading > div {
+  display: grid;
+  gap: 2px;
+}
+
+.remesher-heading small {
+  font-size: 11px;
+}
+
+.remesher-ready,
+.remesher-needed {
+  flex: none;
+  border: 1px solid rgba(43, 212, 191, 0.28);
+  border-radius: 999px;
+  color: #8fe7dd;
+  background: rgba(43, 212, 191, 0.08);
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.remesher-needed {
+  border-color: rgba(255, 145, 47, 0.28);
+  color: #ffb15c;
+  background: rgba(255, 145, 47, 0.07);
+}
+
+.remesher-source {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remesher-settings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px 8px;
+}
+
+.remesher-settings .field {
+  margin-bottom: 0;
+}
+
+.remesher-settings input {
+  min-height: 30px;
+}
+
+.remesher-footer {
+  justify-content: space-between;
+  border-top: 1px solid rgba(43, 212, 191, 0.14);
+  padding-top: 9px;
+}
+
+.remesher-footer > small {
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.remesher-run {
+  flex: none;
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.remesher-result {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid rgba(126, 224, 138, 0.24);
+  border-radius: 6px;
+  color: #baf4c2;
+  background: rgba(126, 224, 138, 0.07);
+  padding: 0 9px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.remesher-result span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remesher-result svg:last-child {
+  margin-left: auto;
 }
 
 .queue,
