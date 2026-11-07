@@ -237,7 +237,7 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.8.16";
+const APP_VERSION = "v26.11.7";
 const SETTINGS_STORAGE_KEY = "imageTo3D.settings.v3";
 const PREVIOUS_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v2";
 const OLDER_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v1";

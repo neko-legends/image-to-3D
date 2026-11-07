@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import gc
+import hashlib
 import json
 import os
 import platform
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import struct
 import sys
+import tarfile
 import time
 import traceback
 import urllib.error
@@ -1883,11 +1885,7 @@ def install_texture_wheels(python_path: Path, paths: dict[str, Path]) -> None:
     if marker.exists():
         return
     if platform.system() != "Windows":
-        emit(
-            "setup",
-            "Texture native wheels are prebuilt for Windows. Non-Windows setup will use source builds if available.",
-        )
-        marker.write_text("non-windows\n", encoding="utf-8")
+        build_texture_extensions_from_source(python_path, paths)
         return
 
     version = python_version(python_path)
@@ -1925,6 +1923,259 @@ def install_texture_wheels(python_path: Path, paths: dict[str, Path]) -> None:
     marker.write_text("ok\n", encoding="utf-8")
 
 
+# --- Non-Windows texture extensions -------------------------------------------
+# The Windows build installs prebuilt texture wheels. Elsewhere the two native
+# texture modules are compiled from the Hunyuan3D source: mesh_inpaint_processor
+# (plain C++/pybind11) and custom_rasterizer (a PyTorch CUDA extension). nvcc
+# comes from a system CUDA toolkit matching PyTorch's CUDA version when one is
+# installed, otherwise from NVIDIA's official redistributable archives
+# (checksum-verified) unpacked into the app venv, so no root install is needed.
+# Mesh-only generation needs neither module, so a failed build only disables
+# texture painting.
+
+TEXTURE_BUILD_ERROR_FILE = ".ih3d-texture-build-error.txt"
+CUDA_REDIST_BASE_URL = "https://developer.download.nvidia.com/compute/cuda/redist"
+# PyTorch CUDA version -> NVIDIA redist release with the same minor version.
+CUDA_REDIST_RELEASES = {(12, 4): "12.4.1", (12, 8): "12.8.1"}
+CUDA_REDIST_COMPONENTS = ("cuda_nvcc", "cuda_cudart", "cuda_cccl")
+# Newest GCC each nvcc release accepts.
+NVCC_MAX_GCC = {(12, 4): 13, (12, 6): 13, (12, 8): 14, (12, 9): 14}
+# glibc 2.41+ declares these math functions noexcept; CUDA 12.x headers do not.
+CUDA_GLIBC_NOEXCEPT_FUNCTIONS = ("rsqrt", "rsqrtf", "sinpi", "sinpif", "cospi", "cospif")
+
+
+def venv_build_info(python_path: Path) -> dict[str, Any]:
+    script = (
+        "import json, sysconfig, torch; "
+        "print(json.dumps({'cuda': torch.version.cuda, 'platlib': sysconfig.get_paths()['platlib'], "
+        "'ext_suffix': sysconfig.get_config_var('EXT_SUFFIX')}))"
+    )
+    output = subprocess.check_output([str(python_path), "-c", script], text=True, encoding="utf-8", errors="replace")
+    return json.loads(output.strip().splitlines()[-1])
+
+
+def parse_cuda_version(text: str) -> tuple[int, int] | None:
+    match = re.search(r"release (\d+)\.(\d+)", text) or re.match(r"\s*(\d+)\.(\d+)", text)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def nvcc_version(nvcc: Path) -> tuple[int, int] | None:
+    try:
+        output = subprocess.check_output([str(nvcc), "--version"], text=True, stderr=subprocess.STDOUT)
+    except Exception:
+        return None
+    return parse_cuda_version(output)
+
+
+def find_system_cuda_home(wanted: tuple[int, int]) -> Path | None:
+    candidates: list[Path] = []
+    for key in ("CUDA_HOME", "CUDA_PATH"):
+        if os.environ.get(key):
+            candidates.append(Path(os.environ[key]))
+    nvcc_on_path = shutil.which("nvcc")
+    if nvcc_on_path:
+        candidates.append(Path(nvcc_on_path).resolve().parent.parent)
+    candidates += [Path("/opt/cuda"), Path("/usr/local/cuda")]
+    for home in candidates:
+        version = nvcc_version(home / "bin" / "nvcc")
+        # Same major version as PyTorch's CUDA and at least as new (sm_120 needs 12.8+).
+        if version and version[0] == wanted[0] and version >= wanted:
+            return home
+    return None
+
+
+def patch_cuda_math_headers(home: Path) -> None:
+    names = "|".join(CUDA_GLIBC_NOEXCEPT_FUNCTIONS)
+    rules = [
+        (
+            home / "include" / "crt" / "math_functions.h",
+            re.compile(rf"^(extern __DEVICE_FUNCTIONS_DECL__ __device_builtin__ (?:double|float) +(?:{names})\((?:double|float) x\));$", re.M),
+            r"\1 noexcept(true);",
+        ),
+        (
+            home / "include" / "crt" / "math_functions.hpp",
+            re.compile(rf"^__func__\(((?:double|float) (?:{names})\((?:const )?(?:double|float) a\))\)$", re.M),
+            r"__func__(\1 noexcept(true))",
+        ),
+    ]
+    for header, pattern, replacement in rules:
+        if header.is_file():
+            content = header.read_text(encoding="utf-8")
+            header.write_text(pattern.sub(replacement, content), encoding="utf-8")
+
+
+def ensure_redist_cuda_home(python_path: Path, info: dict[str, Any], wanted: tuple[int, int]) -> Path:
+    release = CUDA_REDIST_RELEASES.get(wanted)
+    if release is None:
+        raise RuntimeError(
+            f"No CUDA {wanted[0]}.{wanted[1]} toolkit was found. Install the CUDA toolkit (nvcc) and run setup again."
+        )
+    home = python_path.parent.parent / "cuda-toolkit"
+    ready = home / ".ready"
+    if ready.is_file() and ready.read_text(encoding="utf-8").strip() == release:
+        return home
+    shutil.rmtree(home, ignore_errors=True)
+    home.mkdir(parents=True)
+    manifest_path = home / "redistrib.json"
+    download_file(f"{CUDA_REDIST_BASE_URL}/redistrib_{release}.json", manifest_path, f"CUDA {release} manifest")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for component in CUDA_REDIST_COMPONENTS:
+        entry = manifest[component]["linux-x86_64"]
+        archive = home / Path(entry["relative_path"]).name
+        download_file(f"{CUDA_REDIST_BASE_URL}/{entry['relative_path']}", archive, f"CUDA {component}")
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if digest != entry["sha256"]:
+            raise RuntimeError(f"CUDA {component} download checksum did not match.")
+        emit("setup", f"Unpacking CUDA {component}")
+        with tarfile.open(archive) as bundle:
+            # Strip the archive's top-level folder; skip anything unsafe.
+            members = []
+            for member in bundle.getmembers():
+                parts = Path(member.name).parts[1:]
+                if not parts or ".." in parts or Path(member.name).is_absolute():
+                    continue
+                member.name = str(Path(*parts))
+                members.append(member)
+            if hasattr(tarfile, "data_filter"):
+                bundle.extractall(home, members=members, filter="data")
+            else:
+                bundle.extractall(home, members=members)
+        archive.unlink()
+    if not (home / "lib64").exists():
+        (home / "lib64").symlink_to("lib")
+    # cuBLAS/cuSPARSE/cuSOLVER/cuRAND headers come from the NVIDIA pip packages
+    # PyTorch already installed.
+    nvidia_root = Path(info["platlib"]) / "nvidia"
+    if nvidia_root.is_dir():
+        for package in sorted(nvidia_root.iterdir()):
+            include = package / "include"
+            if not include.is_dir():
+                continue
+            for header in include.iterdir():
+                target = home / "include" / header.name
+                if header.name != "__init__.py" and not target.exists():
+                    target.symlink_to(header)
+    patch_cuda_math_headers(home)
+    ready.write_text(release + "\n", encoding="utf-8")
+    return home
+
+
+def compiler_major(command: str) -> int | None:
+    try:
+        output = subprocess.check_output([command, "-dumpversion"], text=True, stderr=subprocess.STDOUT)
+    except Exception:
+        return None
+    match = re.match(r"(\d+)", output.strip())
+    return int(match.group(1)) if match else None
+
+
+def nvcc_host_flags(nvcc: tuple[int, int]) -> list[str]:
+    max_gcc = NVCC_MAX_GCC.get(nvcc, 14)
+    gcc = compiler_major("g++")
+    if gcc is not None and gcc <= max_gcc:
+        return []
+    for version in range(max_gcc, 9, -1):
+        versioned = shutil.which(f"g++-{version}")
+        if versioned:
+            return ["-ccbin", versioned]
+    if shutil.which("clang++"):
+        # Rolling distros (Arch/Omarchy) ship a GCC newer than nvcc's front end
+        # can parse. Compile the host side with clang instead and keep
+        # libstdc++ from using the newest compiler builtins and C++26 paths.
+        return [
+            "-allow-unsupported-compiler",
+            "-ccbin",
+            "clang++",
+            "-D_GLIBCXX_DO_NOT_USE_BUILTIN_TRAITS",
+            "-U__cpp_structured_bindings",
+            "-D__cpp_structured_bindings=201606L",
+        ]
+    raise RuntimeError(
+        f"nvcc {nvcc[0]}.{nvcc[1]} supports GCC {max_gcc} or older, but g++ is version {gcc}. "
+        f"Install g++-{max_gcc} or clang and run setup again."
+    )
+
+
+def cuda_arch_list() -> str:
+    if os.environ.get("TORCH_CUDA_ARCH_LIST"):
+        return os.environ["TORCH_CUDA_ARCH_LIST"]
+    caps = sorted({gpu["capability"] for gpu in nvidia_gpus()})
+    if not caps:
+        caps = [(8, 6), (8, 9), (12, 0)]
+    return ";".join(f"{major}.{minor}" for major, minor in caps)
+
+
+def texture_build_env(python_path: Path, info: dict[str, Any]) -> dict[str, str]:
+    cuda = parse_cuda_version(str(info.get("cuda") or ""))
+    if cuda is None:
+        raise RuntimeError("The app PyTorch build has no CUDA support, so the texture rasterizer cannot be built.")
+    home = find_system_cuda_home(cuda)
+    if home is None:
+        home = ensure_redist_cuda_home(python_path, info, cuda)
+        emit("setup", f"Using app-managed CUDA compiler: {home}")
+    else:
+        emit("setup", f"Using CUDA toolkit: {home}")
+    env = venv_subprocess_env(python_path)
+    env["CUDA_HOME"] = str(home)
+    env["PATH"] = str(home / "bin") + os.pathsep + env.get("PATH", "")
+    env["TORCH_CUDA_ARCH_LIST"] = cuda_arch_list()
+    env.setdefault("MAX_JOBS", str(max(1, min(16, os.cpu_count() or 1))))
+    flags = nvcc_host_flags(nvcc_version(home / "bin" / "nvcc") or cuda)
+    if flags:
+        env["NVCC_APPEND_FLAGS"] = " ".join([env.get("NVCC_APPEND_FLAGS", ""), *flags]).strip()
+    return env
+
+
+def build_mesh_inpaint_processor(python_path: Path, info: dict[str, Any], source_dir: Path) -> None:
+    cpp = source_dir / "hy3dpaint" / "DifferentiableRenderer" / "mesh_inpaint_processor.cpp"
+    if not cpp.is_file():
+        raise RuntimeError(f"Hunyuan source is missing {cpp.name}.")
+    includes = subprocess.check_output(
+        [str(python_path), "-m", "pybind11", "--includes"], text=True, encoding="utf-8", errors="replace"
+    ).split()
+    compiler = os.environ.get("CXX") or shutil.which("c++") or shutil.which("g++") or shutil.which("clang++")
+    if not compiler:
+        raise RuntimeError("A C++ compiler (g++ or clang++) is required to build the texture inpaint module.")
+    target = Path(info["platlib"]) / f"mesh_inpaint_processor{info['ext_suffix']}"
+    run_checked(
+        [compiler, "-O3", "-Wall", "-shared", "-std=c++14", "-fPIC", *includes, str(cpp), "-o", str(target)],
+        "Building texture inpaint module",
+    )
+
+
+def build_texture_extensions_from_source(python_path: Path, paths: dict[str, Path]) -> None:
+    marker = paths["env_dir"] / WHEEL_MARKER
+    error_file = paths["env_dir"] / TEXTURE_BUILD_ERROR_FILE
+    source_dir = paths["hunyuan_source_dir"]
+    try:
+        info = venv_build_info(python_path)
+        build_mesh_inpaint_processor(python_path, info, source_dir)
+        env = texture_build_env(python_path, info)
+        if not python_can_import(python_path, "ninja"):
+            run_checked([str(python_path), "-m", "pip", "install", "ninja"], "Installing ninja build tool")
+        run_checked(
+            [
+                str(python_path), "-m", "pip", "install", "--no-build-isolation", "--no-deps",
+                str(source_dir / "hy3dpaint" / "custom_rasterizer"),
+            ],
+            f"Building texture rasterizer for {env['TORCH_CUDA_ARCH_LIST'].replace(';', ', ')}",
+            env=env,
+        )
+        if not python_can_import(python_path, "custom_rasterizer_kernel"):
+            raise RuntimeError("The texture rasterizer built but could not be imported.")
+    except Exception as error:
+        message = str(error).strip()
+        error_file.write_text(message + "\n", encoding="utf-8")
+        emit(
+            "setup",
+            "Texture painting is unavailable: the native texture modules could not be built. "
+            "Mesh-only generation still works. Details: " + message.splitlines()[0],
+        )
+        return
+    error_file.unlink(missing_ok=True)
+    marker.write_text("source-build\n", encoding="utf-8")
+
+
 def ensure_pkg_resources(python_path: Path) -> None:
     if python_can_import(python_path, "pkg_resources"):
         return
@@ -1939,7 +2190,10 @@ def ensure_env(paths: dict[str, Path], pytorch_profile: str) -> Path:
     env_dir = paths["env_dir"]
     python_path = venv_python(env_dir)
     marker = env_dir / ENV_MARKER
-    if python_path.exists() and not supported_python_version(python_version(python_path)):
+    env_version = python_version(python_path) if python_path.exists() else None
+    # Off Windows, pymeshlab==2022.2.post3 has wheels only up to Python 3.11.
+    linux_too_new = platform.system() != "Windows" and env_version is not None and env_version[:2] > (3, 11)
+    if python_path.exists() and (not supported_python_version(env_version) or linux_too_new):
         emit("setup", "Recreating app Python environment with a supported Python version")
         shutil.rmtree(env_dir, ignore_errors=True)
         python_path = venv_python(env_dir)
@@ -1952,9 +2206,24 @@ def ensure_env(paths: dict[str, Path], pytorch_profile: str) -> Path:
         shutil.rmtree(env_dir, ignore_errors=True)
         python_path = venv_python(env_dir)
 
+    if platform.system() != "Windows" and (
+        (not python_path.exists() and marker.exists())
+        or (python_path.exists() and not python_can_import(python_path, "json"))
+    ):
+        # Made for another OS (e.g. a Windows venv in a shared store) or its
+        # base interpreter moved away.
+        emit("setup", "Recreating app Python environment: the existing one cannot run here")
+        shutil.rmtree(env_dir, ignore_errors=True)
+
     if not python_path.exists():
         emit("setup", f"Creating app Python environment: {env_dir}")
-        venv.EnvBuilder(with_pip=True).create(env_dir)
+        if platform.system() == "Windows":
+            venv.EnvBuilder(with_pip=True).create(env_dir)
+        else:
+            # Build from the real interpreter: a venv made through a symlink
+            # (e.g. uv's ~/.local/bin/python3.12) points its home at the
+            # symlink folder and cannot find the standard library.
+            subprocess.check_call([os.path.realpath(sys.executable), "-m", "venv", str(env_dir)])
 
     if not supported_python_version(python_version(python_path)):
         raise RuntimeError(f"{APP_NAME} requires Python 3.10, 3.11, or 3.12.")
@@ -1984,6 +2253,8 @@ def ensure_env(paths: dict[str, Path], pytorch_profile: str) -> Path:
 def ensure_hunyuan_env(python_path: Path, paths: dict[str, Path]) -> None:
     marker = paths["env_dir"] / HUNYUAN_ENV_MARKER
     if marker.exists():
+        if platform.system() != "Windows" and not (paths["env_dir"] / WHEEL_MARKER).exists():
+            install_texture_wheels(python_path, paths)
         marker.write_text("ok\n", encoding="utf-8")
         return
     pip = [str(python_path), "-m", "pip"]
@@ -3202,6 +3473,17 @@ def run_hunyuan_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
 
     options = job.get("options", {})
     mode = str(options.get("mode", "meshTexture"))
+    if mode != "meshOnly" and platform.system() != "Windows":
+        import importlib.util
+
+        if importlib.util.find_spec("custom_rasterizer_kernel") is None:
+            error_file = paths["env_dir"] / TEXTURE_BUILD_ERROR_FILE
+            detail = error_file.read_text(encoding="utf-8").strip() if error_file.is_file() else ""
+            raise RuntimeError(
+                "Texture painting needs the custom_rasterizer CUDA extension, which is not built in this "
+                "runtime. Use Mesh only, or run setup again to retry the build."
+                + (f"\n\nLast build error:\n{detail}" if detail else "")
+            )
     overwrite = as_bool(options.get("overwrite"), False)
     requested_output = Path(str(options.get("outputDir", "")).strip() or paths["output_dir"])
     if not requested_output.is_absolute():

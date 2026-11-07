@@ -9,13 +9,31 @@ use std::{
 };
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::{fs::PermissionsExt, process::CommandExt as _};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
 const VERSION: &str = "1.1.0";
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 const WINDOWS_ARCHIVE_URL: &str = "https://github.com/huxingyi/autoremesher/releases/download/1.1.0/autoremesher-1.1.0-win32-x86_64.zip";
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 const WINDOWS_ARCHIVE_SHA256: &str =
     "49a34610c3de1b4d784461c8b0380f8dade3837e6d39fc4154640bdc93a13202";
+#[cfg(target_os = "linux")]
+const LINUX_APPIMAGE_URL: &str =
+    "https://github.com/huxingyi/autoremesher/releases/download/1.1.0/autoremesher-1.1.0.AppImage";
+#[cfg(target_os = "linux")]
+const LINUX_APPIMAGE_SHA256: &str =
+    "e92426bfbdb7a2e9f33a93e133af8ed325c4cd8b07f7746ff149f5a3d820ed6b";
+#[cfg(target_os = "linux")]
+const LINUX_APPIMAGE_NAME: &str = "autoremesher-1.1.0.AppImage";
+/// Platforms with an upstream AutoRemesher 1.1.0 build the app can manage:
+/// the Windows zip and the x86_64 Linux AppImage.
+const MANAGED_DOWNLOAD_SUPPORTED: bool = cfg!(target_os = "windows")
+    || cfg!(all(target_os = "linux", target_arch = "x86_64"));
+const UNSUPPORTED_MESSAGE: &str =
+    "The managed AutoRemesher download is available in the Windows and x86_64 Linux builds.";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -116,12 +134,19 @@ fn executable_path(app_data: &Path) -> Option<PathBuf> {
     if cfg!(target_os = "windows") {
         find_file_named(&root, "autoremesher.exe")
     } else {
+        #[cfg(target_os = "linux")]
+        {
+            let appimage = root.join(LINUX_APPIMAGE_NAME);
+            if appimage.is_file() {
+                return Some(appimage);
+            }
+        }
         find_file_named(&root, "autoremesher")
     }
 }
 
 pub fn status(app_data: &Path) -> RemesherStatus {
-    let supported = cfg!(target_os = "windows");
+    let supported = MANAGED_DOWNLOAD_SUPPORTED;
     let executable = supported.then(|| executable_path(app_data)).flatten();
     RemesherStatus {
         supported,
@@ -129,8 +154,7 @@ pub fn status(app_data: &Path) -> RemesherStatus {
         version: VERSION.to_string(),
         executable_path: executable.as_ref().map(|path| path.display().to_string()),
         message: if !supported {
-            "The managed AutoRemesher download is currently available in the Windows build."
-                .to_string()
+            UNSUPPORTED_MESSAGE.to_string()
         } else if executable.is_some() {
             format!("AutoRemesher {VERSION} is ready.")
         } else {
@@ -163,6 +187,7 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
     }
 }
 
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn extract_zip(archive_path: &Path, destination: &Path) -> Result<(), String> {
     let archive_file = File::open(archive_path)
         .map_err(|error| format!("Unable to open AutoRemesher archive: {error}"))?;
@@ -194,33 +219,66 @@ fn extract_zip(archive_path: &Path, destination: &Path) -> Result<(), String> {
 }
 
 pub fn install(app_data: &Path) -> Result<RemesherStatus, String> {
-    if !cfg!(target_os = "windows") {
-        return Err(
-            "The managed AutoRemesher download is currently available in the Windows build."
-                .to_string(),
-        );
+    if !MANAGED_DOWNLOAD_SUPPORTED {
+        return Err(UNSUPPORTED_MESSAGE.to_string());
     }
     if executable_path(app_data).is_some() {
         return Ok(status(app_data));
     }
+    #[cfg(target_os = "linux")]
+    {
+        install_linux_appimage(app_data)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        install_windows_archive(app_data)
+    }
+}
 
-    let root = tool_dir(app_data);
-    fs::create_dir_all(&root)
-        .map_err(|error| format!("Unable to create AutoRemesher folder: {error}"))?;
-    let download = root.join("autoremesher.download");
-    let response = ureq::get(WINDOWS_ARCHIVE_URL)
+fn download(url: &str, destination: &Path) -> Result<(), String> {
+    let response = ureq::get(url)
         .set("User-Agent", "NekoLegends-ImageTo3D")
         .call()
         .map_err(|error| format!("Unable to download AutoRemesher: {error}"))?;
     let mut reader = response.into_reader();
-    let mut output = File::create(&download)
+    let mut output = File::create(destination)
         .map_err(|error| format!("Unable to create AutoRemesher download: {error}"))?;
     std::io::copy(&mut reader, &mut output)
         .map_err(|error| format!("Unable to save AutoRemesher download: {error}"))?;
     output
         .flush()
-        .map_err(|error| format!("Unable to save AutoRemesher download: {error}"))?;
-    drop(output);
+        .map_err(|error| format!("Unable to save AutoRemesher download: {error}"))
+}
+
+/// Linux: the upstream AppImage carries the same headless CLI as the Windows
+/// build. It is stored as-is and run with APPIMAGE_EXTRACT_AND_RUN so it does
+/// not need FUSE 2.
+#[cfg(target_os = "linux")]
+fn install_linux_appimage(app_data: &Path) -> Result<RemesherStatus, String> {
+    let root = tool_dir(app_data);
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("Unable to create AutoRemesher folder: {error}"))?;
+    let partial = root.join("autoremesher.download");
+    download(LINUX_APPIMAGE_URL, &partial)?;
+    if let Err(error) = verify_sha256(&partial, LINUX_APPIMAGE_SHA256) {
+        let _ = fs::remove_file(&partial);
+        return Err(error);
+    }
+    fs::set_permissions(&partial, fs::Permissions::from_mode(0o755))
+        .map_err(|error| format!("Unable to mark AutoRemesher executable: {error}"))?;
+    fs::rename(&partial, root.join(LINUX_APPIMAGE_NAME))
+        .map_err(|error| format!("Unable to install AutoRemesher: {error}"))?;
+    Ok(status(app_data))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn install_windows_archive(app_data: &Path) -> Result<RemesherStatus, String> {
+
+    let root = tool_dir(app_data);
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("Unable to create AutoRemesher folder: {error}"))?;
+    let download = root.join("autoremesher.download");
+    self::download(WINDOWS_ARCHIVE_URL, &download)?;
     verify_sha256(&download, WINDOWS_ARCHIVE_SHA256)?;
     extract_zip(&download, &root)?;
 
@@ -503,6 +561,19 @@ pub fn run(
         .stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(target_os = "linux")]
+    {
+        // No FUSE 2 needed; the headless run never shows a window, and the
+        // bundled Qt 5 has no Wayland plugin.
+        command
+            .env("APPIMAGE_EXTRACT_AND_RUN", "1")
+            .env("QT_QPA_PLATFORM", "offscreen");
+    }
+    crate::child_env::strip_appimage_env(&mut command);
+    // Own process group so cancel (`kill -TERM -<pid>`) reaches the AppImage
+    // runtime's child too.
+    #[cfg(unix)]
+    command.process_group(0);
 
     let child = match command.spawn() {
         Ok(child) => child,

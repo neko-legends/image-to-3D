@@ -1,0 +1,98 @@
+# Builds Windows and Linux release assets so Neko Legends Control Center can
+# install this app on either OS.
+#
+# - Push to the `release-test` branch: build both platforms and keep the files
+#   as workflow artifacts only (nothing is published) for testing.
+# - Push a tag like v26.11.7: build both platforms and upload the portable .exe,
+#   the NSIS setup .exe and the .AppImage to that tag's release (created if
+#   missing).
+# - Run manually with an existing tag: build only the Linux AppImage and add it
+#   to that release, leaving its Windows assets alone.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: [release-test]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to add a Linux AppImage to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    # Oldest supported Ubuntu keeps the AppImage's glibc requirement low, so it
+    # runs on Omarchy/Arch and older distros alike.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npx tauri build --bundles appimage
+      - uses: actions/upload-artifact@v5
+        with:
+          name: linux
+          path: src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
+  windows:
+    if: github.event_name == 'push'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npx tauri build --bundles nsis
+      - uses: actions/upload-artifact@v5
+        with:
+          name: windows
+          path: |
+            src-tauri/target/release/*.exe
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, windows]
+    if: >-
+      always() && needs.linux.result == 'success' &&
+      (needs.windows.result == 'success' || needs.windows.result == 'skipped') &&
+      (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Upload assets to the release
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+          find assets -type f -print0 | xargs -0 gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber

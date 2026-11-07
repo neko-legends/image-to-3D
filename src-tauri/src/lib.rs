@@ -24,6 +24,7 @@ use std::os::unix::process::CommandExt;
 use std::os::windows::process::CommandExt;
 
 mod autoremesher;
+mod child_env;
 mod neko_store;
 use autoremesher::{ActiveRemeshState, RemeshOptions, RemeshResult, RemesherStatus};
 use neko_store::NekoStore;
@@ -694,10 +695,24 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn portable_app_data_dir() -> Option<PathBuf> {
-    let exe_dir = std::env::current_exe()
+/// Folder the app was installed/launched from. Inside an AppImage the
+/// executable lives in a read-only (or throwaway extracted) mount, so use the
+/// folder holding the `.AppImage` file instead, which is the Linux equivalent
+/// of the Windows portable exe folder.
+fn app_install_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(appimage) = env::var_os("APPIMAGE").map(PathBuf::from) {
+        if let Some(parent) = appimage.parent().filter(|parent| parent.is_dir()) {
+            return Some(parent.to_path_buf());
+        }
+    }
+    std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))?;
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+}
+
+fn portable_app_data_dir() -> Option<PathBuf> {
+    let exe_dir = app_install_dir()?;
     let has_portable_layout = exe_dir.join("python").join("hunyuan_worker.py").is_file()
         || exe_dir
             .join("output")
@@ -735,9 +750,7 @@ const NEKO_APP_SLUG: &str = "image-to-3d";
 /// `D:\NekoLegendsAI` (next to the app, on the roomy data drive).
 fn neko_store(app: &AppHandle) -> Result<NekoStore, String> {
     let app_data = app_data_dir(app)?;
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let exe_dir = app_install_dir();
     Ok(NekoStore::resolve_with_volume_hint(
         NEKO_APP_SLUG,
         &app_data,
@@ -982,12 +995,7 @@ fn resolve_runtime_dir(app: &AppHandle, options: &HunyuanOptions) -> Result<Path
 }
 
 fn default_output_dir() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("Unable to resolve app location: {error}"))?;
-    let app_dir = exe
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "Unable to resolve app folder.".to_string())?;
+    let app_dir = app_install_dir().ok_or_else(|| "Unable to resolve app folder.".to_string())?;
     Ok(app_dir.join("output"))
 }
 
@@ -1456,9 +1464,7 @@ fn mark_job_manifest_status(
 }
 
 fn worker_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf));
+    let exe_dir = app_install_dir();
     let resource_dir = app.path().resource_dir().ok();
     let candidates = [
         std::env::current_dir()
@@ -1534,6 +1540,8 @@ fn hide_command_window(command: &mut Command) {
     {
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    // Every helper process goes through here; keep AppImage paths out of it.
+    child_env::strip_appimage_env(command);
 }
 
 fn command_from_python_spec(spec: &str) -> Command {
@@ -1568,18 +1576,100 @@ fn find_python() -> Option<String> {
             "py -3.10", "py -3.11", "py -3.12", "py -3", "python", "python3",
         ]
     } else {
-        vec![
-            "python3.10",
-            "python3.11",
-            "python3.12",
-            "python3",
-            "python",
-        ]
+        // pymeshlab==2022.2.post3 (pinned by the worker) has Linux wheels only
+        // up to Python 3.11, so a uv-managed 3.11 beats a system 3.12.
+        vec!["python3.11", "python3.10", "python3", "python"]
     };
     candidates
         .into_iter()
         .map(str::to_string)
-        .find(|candidate| python_version(candidate).is_some_and(supported_python_version))
+        .find(|candidate| {
+            python_version(candidate).is_some_and(|version| {
+                supported_python_version(version) && (cfg!(target_os = "windows") || version.1 <= 11)
+            })
+        })
+        .or_else(find_uv_python)
+}
+
+/// Version range the worker's Linux dependency pins support, in `uv` request
+/// syntax.
+#[cfg(not(target_os = "windows"))]
+const UV_PYTHON_REQUEST: &str = ">=3.10,<3.12";
+/// Version `uv` installs when no supported interpreter exists.
+#[cfg(not(target_os = "windows"))]
+const UV_PYTHON_INSTALL: &str = "3.11";
+
+/// Rolling distros (Arch/Omarchy) ship only a newer system Python than the
+/// worker supports. When `uv` is installed, use (or install) a uv-managed
+/// interpreter instead.
+#[cfg(not(target_os = "windows"))]
+fn find_uv_python() -> Option<String> {
+    let mut command = Command::new("uv");
+    command.args(["python", "find", "--no-project", UV_PYTHON_REQUEST]);
+    hide_command_window(&mut command);
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // `command_from_python_spec` splits on whitespace.
+    if path.is_empty() || path.contains(char::is_whitespace) {
+        return None;
+    }
+    python_version(&path)
+        .is_some_and(supported_python_version)
+        .then_some(path)
+}
+
+#[cfg(target_os = "windows")]
+fn find_uv_python() -> Option<String> {
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn uv_available() -> bool {
+    let mut command = Command::new("uv");
+    command.arg("--version");
+    hide_command_window(&mut command);
+    matches!(command.output(), Ok(output) if output.status.success())
+}
+
+#[cfg(target_os = "windows")]
+fn uv_available() -> bool {
+    false
+}
+
+/// Python used to run setup. On Linux/macOS, installs a uv-managed Python
+/// when no supported interpreter is present.
+fn find_or_install_python() -> Result<String, String> {
+    if let Some(python) = find_python() {
+        return Ok(python);
+    }
+    #[cfg(not(target_os = "windows"))]
+    if uv_available() {
+        let mut command = Command::new("uv");
+        command.args(["python", "install", UV_PYTHON_INSTALL]);
+        hide_command_window(&mut command);
+        let output = command
+            .output()
+            .map_err(|error| format!("Unable to run uv to install Python {UV_PYTHON_INSTALL}: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "uv could not install Python {UV_PYTHON_INSTALL}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        return find_uv_python().ok_or_else(|| {
+            format!("uv installed Python {UV_PYTHON_INSTALL}, but it could not be located.")
+        });
+    }
+    Err(if cfg!(target_os = "windows") {
+        "Python 3.10, 3.11, or 3.12 was not found. Install Python and try again.".to_string()
+    } else {
+        "Python 3.10 or 3.11 was not found. Install one (or install uv so Image To 3D can \
+         fetch Python 3.11 itself) and try again."
+            .to_string()
+    })
 }
 
 fn configure_worker_command(command: &mut Command) {
@@ -1850,6 +1940,7 @@ fn check_runtime(
     let models = resolve_model_dir(&app, &resolved_options)?;
     let outputs = default_output_dir()?;
     let jobs = jobs_dir(&app)?;
+    let python_command = find_python();
     let tencent_ready = model_cache_has_snapshot(&models, "tencent/Hunyuan3D-2.1");
     let hunyuan_env_ready = hunyuan_env_ready(&env);
     let trellis_env_ready = trellis_env_ready(&env);
@@ -1869,8 +1960,10 @@ fn check_runtime(
     };
 
     Ok(RuntimeStatus {
-        python_found: find_python().is_some(),
-        python_command: find_python(),
+        python_found: python_command.is_some() || uv_available(),
+        python_command: python_command.or_else(|| {
+            uv_available().then(|| "uv (installs Python 3.11 during setup)".to_string())
+        }),
         app_data_dir: app_data.display().to_string(),
         worker_path: worker.display().to_string(),
         env_dir: env.display().to_string(),
@@ -2297,9 +2390,7 @@ fn start_worker_job_core(
         let env = env_dir_for_profile_opts(&app, &job.options, &requested_profile)?;
         Command::new(env_python_path(&env))
     } else {
-        let python = find_python().ok_or_else(|| {
-            "Python 3.10, 3.11, or 3.12 was not found. Install Python and try again.".to_string()
-        })?;
+        let python = find_or_install_python()?;
         command_from_python_spec(&python)
     };
     configure_worker_command(&mut command);
@@ -3123,10 +3214,7 @@ fn set_agent_server_enabled(
 }
 
 fn agent_api_autostart_config_path() -> Option<PathBuf> {
-    env::current_exe().ok().and_then(|exe| {
-        exe.parent()
-            .map(|parent| parent.join("output").join("agent-api-autostart.json"))
-    })
+    app_install_dir().map(|dir| dir.join("output").join("agent-api-autostart.json"))
 }
 
 fn read_agent_api_autostart_config() -> Option<AgentApiAutostartConfig> {

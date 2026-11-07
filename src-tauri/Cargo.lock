@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "image-to-3d"
-version = "26.8.16"
+version = "26.11.7"
 dependencies = [
  "base64 0.22.1",
  "gltf",

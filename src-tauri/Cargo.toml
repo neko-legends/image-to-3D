@@ -1,6 +1,6 @@
 [package]
 name = "image-to-3d"
-version = "26.8.16"
+version = "26.11.7"
 description = "Local image-to-3D workflow app"
 authors = ["Image To 3D contributors"]
 license = "MIT"
