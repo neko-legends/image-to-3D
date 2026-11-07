@@ -18,8 +18,11 @@ const VERSION: &str = "1.1.0";
 #[cfg_attr(target_os = "linux", allow(dead_code))]
 const WINDOWS_ARCHIVE_URL: &str = "https://github.com/huxingyi/autoremesher/releases/download/1.1.0/autoremesher-1.1.0-win32-x86_64.zip";
 #[cfg_attr(target_os = "linux", allow(dead_code))]
+// Upstream re-uploaded the 1.1.0 Windows asset on 2026-08-17 (a flat zip
+// instead of the original zip-in-zip). This is the digest GitHub reports for
+// the current release asset.
 const WINDOWS_ARCHIVE_SHA256: &str =
-    "49a34610c3de1b4d784461c8b0380f8dade3837e6d39fc4154640bdc93a13202";
+    "a71e0316325eae77a860a68da69814d05213795aa7cf6f23603901af48d4ab94";
 #[cfg(target_os = "linux")]
 const LINUX_APPIMAGE_URL: &str =
     "https://github.com/huxingyi/autoremesher/releases/download/1.1.0/autoremesher-1.1.0.AppImage";
@@ -36,6 +39,45 @@ const UNSUPPORTED_MESSAGE: &str =
     "The managed AutoRemesher download is available in the Windows and x86_64 Linux builds.";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(target_os = "linux")]
+const LINUX_NO_DISPLAY_MESSAGE: &str = "The Linux AutoRemesher build only ships the Qt xcb (X11) platform plugin, so it needs an X display: run Image To 3D in a desktop session with XWayland (DISPLAY set), or install xvfb-run (Arch: xorg-server-xvfb) for headless use.";
+
+/// How the Linux AppImage gets an X display: the upstream AppImage bundles
+/// Qt 5.15 with only the xcb platform plugin (no offscreen/wayland), and Qt
+/// aborts at startup without a display even for the CLI.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LinuxDisplay {
+    /// DISPLAY is set (X11 or XWayland).
+    X11,
+    /// No DISPLAY; wrap the run in `xvfb-run -a`.
+    Xvfb(PathBuf),
+}
+
+#[cfg(target_os = "linux")]
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_display(display: Option<&str>, xvfb_run: Option<PathBuf>) -> Option<LinuxDisplay> {
+    if display.is_some_and(|value| !value.trim().is_empty()) {
+        Some(LinuxDisplay::X11)
+    } else {
+        xvfb_run.map(LinuxDisplay::Xvfb)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn current_linux_display() -> Option<LinuxDisplay> {
+    linux_display(
+        std::env::var("DISPLAY").ok().as_deref(),
+        find_on_path("xvfb-run"),
+    )
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -155,12 +197,26 @@ pub fn status(app_data: &Path) -> RemesherStatus {
         executable_path: executable.as_ref().map(|path| path.display().to_string()),
         message: if !supported {
             UNSUPPORTED_MESSAGE.to_string()
+        } else if let Some(warning) = display_warning() {
+            warning
         } else if executable.is_some() {
             format!("AutoRemesher {VERSION} is ready.")
         } else {
             format!("AutoRemesher {VERSION} is not installed yet.")
         },
     }
+}
+
+#[cfg(target_os = "linux")]
+fn display_warning() -> Option<String> {
+    current_linux_display()
+        .is_none()
+        .then(|| LINUX_NO_DISPLAY_MESSAGE.to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn display_warning() -> Option<String> {
+    None
 }
 
 fn verify_sha256(path: &Path, expected: &str) -> Result<(), String> {
@@ -282,8 +338,9 @@ fn install_windows_archive(app_data: &Path) -> Result<RemesherStatus, String> {
     verify_sha256(&download, WINDOWS_ARCHIVE_SHA256)?;
     extract_zip(&download, &root)?;
 
-    // The 1.1.0 Windows release archive contains a second zip with the actual
-    // executable and Qt runtime, so unpack that layer when present.
+    // The original 1.1.0 Windows upload wrapped a second zip with the actual
+    // executable and Qt runtime; the current asset is flat. Unpack the inner
+    // layer when present.
     if executable_path(app_data).is_none() {
         let nested =
             find_file_named(&root, "autoremesher-1.1.0-win32-x86_64.zip").ok_or_else(|| {
@@ -502,6 +559,8 @@ pub fn run(
     validate_options(&options)?;
     let executable = executable_path(app_data)
         .ok_or_else(|| "Install AutoRemesher before running it.".to_string())?;
+    #[cfg(target_os = "linux")]
+    let display = current_linux_display().ok_or_else(|| LINUX_NO_DISPLAY_MESSAGE.to_string())?;
     let input = PathBuf::from(options.input_path.trim());
     if !input.is_file() {
         return Err(format!("Input model was not found: {}", input.display()));
@@ -536,6 +595,16 @@ pub fn run(
     let output_path = unique_output_path(&input)?;
     let report_path = output_path.with_extension("report.txt");
 
+    #[cfg(target_os = "linux")]
+    let mut command = match &display {
+        LinuxDisplay::X11 => Command::new(&executable),
+        LinuxDisplay::Xvfb(xvfb_run) => {
+            let mut command = Command::new(xvfb_run);
+            command.arg("-a").arg(&executable);
+            command
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
     let mut command = Command::new(&executable);
     command
         .current_dir(executable.parent().unwrap_or_else(|| Path::new(".")))
@@ -563,11 +632,12 @@ pub fn run(
     command.creation_flags(CREATE_NO_WINDOW);
     #[cfg(target_os = "linux")]
     {
-        // No FUSE 2 needed; the headless run never shows a window, and the
-        // bundled Qt 5 has no Wayland plugin.
+        // No FUSE 2 needed. The bundled Qt 5 only has the xcb platform
+        // plugin (no offscreen/wayland), so it talks to X11/XWayland or the
+        // xvfb-run server; the CLI run never maps a window.
         command
             .env("APPIMAGE_EXTRACT_AND_RUN", "1")
-            .env("QT_QPA_PLATFORM", "offscreen");
+            .env("QT_QPA_PLATFORM", "xcb");
     }
     crate::child_env::strip_appimage_env(&mut command);
     // Own process group so cancel (`kill -TERM -<pid>`) reaches the AppImage
@@ -655,6 +725,19 @@ fn kill_process_tree(pid: u32) -> Result<(), String> {
 mod tests {
     use super::*;
     use base64::{engine::general_purpose, Engine as _};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_display_prefers_x11_then_xvfb() {
+        let xvfb = PathBuf::from("/usr/bin/xvfb-run");
+        assert_eq!(linux_display(Some(":0"), Some(xvfb.clone())), Some(LinuxDisplay::X11));
+        assert_eq!(
+            linux_display(Some(""), Some(xvfb.clone())),
+            Some(LinuxDisplay::Xvfb(xvfb.clone()))
+        );
+        assert_eq!(linux_display(None, Some(xvfb.clone())), Some(LinuxDisplay::Xvfb(xvfb)));
+        assert_eq!(linux_display(None, None), None);
+    }
 
     #[test]
     fn transforms_positions_with_row_major_matrix() {

@@ -237,7 +237,7 @@ type PreviewImages = {
   error?: string;
 };
 
-const APP_VERSION = "v26.11.7";
+const APP_VERSION = "v26.11.9";
 const SETTINGS_STORAGE_KEY = "imageTo3D.settings.v3";
 const PREVIOUS_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v2";
 const OLDER_SETTINGS_STORAGE_KEY = "imageTo3D.settings.v1";
@@ -1177,7 +1177,13 @@ function App() {
   useEffect(() => {
     if (!isTauriRuntime() || !agentControlEnabled) return;
     const port = normalizeAgentPort(agentPort) ?? DEFAULT_AGENT_API_PORT;
-    void invoke<AgentServerStatus>("set_agent_server_enabled", { enabled: true, port })
+    // If the backend already started the Agent API (from --agent-api-port, the
+    // port env vars or autostart), keep its port: an explicit launch port wins
+    // over the port remembered in this window's storage.
+    void invoke<AgentServerStatus>("get_agent_server_status")
+      .then((current) =>
+        current.enabled ? current : invoke<AgentServerStatus>("set_agent_server_enabled", { enabled: true, port })
+      )
       .then((status) => {
         setAgentStatus(status);
         setAgentPort(String(status.port));

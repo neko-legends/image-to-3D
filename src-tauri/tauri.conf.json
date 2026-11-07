@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Image To 3D",
-  "version": "26.11.7",
+  "version": "26.11.9",
   "identifier": "public.image.to3d",
   "build": {
     "beforeDevCommand": "npm run dev",

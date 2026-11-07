@@ -3,7 +3,10 @@
 #
 # - Push to the `release-test` branch: build both platforms and keep the files
 #   as workflow artifacts only (nothing is published) for testing.
-# - Push a tag like v26.11.7: build both platforms and upload the portable .exe,
+# Releases are cut from `main` (the default branch): push main, then tag the
+# main commit.
+#
+# - Push a tag like v26.11.9: build both platforms and upload the portable .exe,
 #   the NSIS setup .exe and the .AppImage to that tag's release (created if
 #   missing).
 # - Run manually with an existing tag: build only the Linux AppImage and add it

@@ -2115,6 +2115,86 @@ async fn run_autoremesher(
     .map_err(|error| format!("AutoRemesher task failed: {error}"))?
 }
 
+/// Agent API remesh runs happen on a background thread (the agent server is
+/// single-threaded); this holds whether one is running and its last outcome.
+static AGENT_REMESH_RUN: Mutex<(bool, Option<serde_json::Value>)> = Mutex::new((false, None));
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentRemeshRequest {
+    input_path: String,
+    target_quads: Option<u32>,
+    edge_scaling: Option<f64>,
+    sharp_edge: Option<f64>,
+    smooth_normal: Option<f64>,
+    adaptivity: Option<f64>,
+    anisotropy: Option<f64>,
+}
+
+impl AgentRemeshRequest {
+    /// Missing fields take the UI defaults.
+    fn into_options(self) -> RemeshOptions {
+        RemeshOptions {
+            input_path: self.input_path,
+            target_quads: self.target_quads.unwrap_or(50_000),
+            edge_scaling: self.edge_scaling.unwrap_or(1.0),
+            sharp_edge: self.sharp_edge.unwrap_or(90.0),
+            smooth_normal: self.smooth_normal.unwrap_or(0.0),
+            adaptivity: self.adaptivity.unwrap_or(1.0),
+            anisotropy: self.anisotropy.unwrap_or(1.0),
+        }
+    }
+}
+
+fn agent_remesh_status(app: &AppHandle) -> Result<serde_json::Value, String> {
+    let status = autoremesher::status(&app_data_dir(app)?);
+    let (running, last) = AGENT_REMESH_RUN
+        .lock()
+        .map(|run| run.clone())
+        .map_err(|_| "Unable to lock AutoRemesher agent state.".to_string())?;
+    let mut value = serde_json::to_value(status).map_err(|error| error.to_string())?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("running".to_string(), serde_json::Value::Bool(running));
+        object.insert("lastRun".to_string(), last.unwrap_or(serde_json::Value::Null));
+    }
+    Ok(value)
+}
+
+fn start_agent_remesh(
+    app: &AppHandle,
+    active_jobs: &ActiveJobState,
+    body: &[u8],
+) -> Result<serde_json::Value, String> {
+    if active_jobs.is_busy()? {
+        return Err("Wait for the current generation job to finish before remeshing.".to_string());
+    }
+    let request: AgentRemeshRequest = serde_json::from_slice(body)
+        .map_err(|error| format!("Invalid JSON request (inputPath is required): {error}"))?;
+    let options = request.into_options();
+    let app_data = app_data_dir(app)?;
+    let remesh_state = app.state::<ActiveRemeshState>().inner().clone();
+    {
+        let mut run = AGENT_REMESH_RUN
+            .lock()
+            .map_err(|_| "Unable to lock AutoRemesher agent state.".to_string())?;
+        if run.0 {
+            return Err("Another remesh is already running.".to_string());
+        }
+        *run = (true, None);
+    }
+    let input_path = options.input_path.clone();
+    thread::spawn(move || {
+        let outcome = match autoremesher::run(&app_data, &remesh_state, options) {
+            Ok(result) => serde_json::json!({ "ok": true, "inputPath": input_path, "result": result }),
+            Err(error) => serde_json::json!({ "ok": false, "inputPath": input_path, "error": error }),
+        };
+        if let Ok(mut run) = AGENT_REMESH_RUN.lock() {
+            *run = (false, Some(outcome));
+        }
+    });
+    Ok(serde_json::json!({ "ok": true, "started": true }))
+}
+
 #[tauri::command]
 fn cancel_autoremesher(active_remesh: State<'_, ActiveRemeshState>) -> Result<(), String> {
     active_remesh.cancel()
@@ -2863,7 +2943,11 @@ fn agent_openapi(port: u16) -> serde_json::Value {
             "/open-path": { "post": { "summary": "Open a local file or folder" } },
             "/open-containing-folder": { "post": { "summary": "Open the containing folder for a local path" } },
             "/generate": { "post": { "summary": "Start an Image To 3D generation job" } },
-            "/cancel": { "post": { "summary": "Cancel the active job" } }
+            "/cancel": { "post": { "summary": "Cancel the active job" } },
+            "/autoremesher": { "get": { "summary": "AutoRemesher install status, whether a remesh is running, and the last remesh result" } },
+            "/autoremesher/install": { "post": { "summary": "Download, verify and install the managed AutoRemesher build" } },
+            "/autoremesher/run": { "post": { "summary": "Start a remesh: {inputPath (OBJ/GLB/GLTF), targetQuads?, edgeScaling?, sharpEdge?, smoothNormal?, adaptivity?, anisotropy?}; poll GET /autoremesher" } },
+            "/autoremesher/cancel": { "post": { "summary": "Cancel the running remesh" } }
         }
     })
 }
@@ -3074,6 +3158,16 @@ fn handle_agent_route(
             kill_process_tree(pid)?;
             Ok(serde_json::json!({ "ok": true }))
         }
+        ("GET", "/autoremesher") => agent_remesh_status(app),
+        ("POST", "/autoremesher/install") => {
+            let status = autoremesher::install(&app_data_dir(app)?)?;
+            serde_json::to_value(status).map_err(|error| error.to_string())
+        }
+        ("POST", "/autoremesher/run") => start_agent_remesh(app, active_jobs, &request.body),
+        ("POST", "/autoremesher/cancel") => {
+            app.state::<ActiveRemeshState>().cancel()?;
+            Ok(serde_json::json!({ "ok": true }))
+        }
         _ => Err(format!(
             "No agent endpoint for {} {}",
             request.method, request.path
@@ -3270,8 +3364,21 @@ fn agent_api_headless_requested() -> bool {
         || env_truthy("IH3D_HEADLESS")
 }
 
+/// Explicit launch port: `--agent-api-port`/`--agent-port`, then the port env
+/// vars. This beats the autostart config and the port saved in the shared
+/// agent-api-registry.json (see `validate_agent_api_port`).
 fn agent_api_cli_port() -> Option<u16> {
-    let mut args = env::args().skip(1);
+    agent_api_port_from_args(env::args().skip(1)).or_else(|| {
+        env::var("I3D_AGENT_API_PORT")
+            .or_else(|_| env::var("IH3D_AGENT_API_PORT"))
+            .or_else(|_| env::var("NEKO_AGENT_API_PORT"))
+            .ok()
+            .and_then(|value| value.trim().parse::<u16>().ok())
+            .filter(|port| *port > 0)
+    })
+}
+
+fn agent_api_port_from_args(mut args: impl Iterator<Item = String>) -> Option<u16> {
     while let Some(arg) = args.next() {
         if arg == "--agent-api-port" || arg == "--agent-port" {
             return args.next().and_then(|value| value.parse::<u16>().ok());
@@ -3283,12 +3390,7 @@ fn agent_api_cli_port() -> Option<u16> {
             return value.parse::<u16>().ok();
         }
     }
-    env::var("I3D_AGENT_API_PORT")
-        .or_else(|_| env::var("IH3D_AGENT_API_PORT"))
-        .or_else(|_| env::var("NEKO_AGENT_API_PORT"))
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-        .filter(|port| *port > 0)
+    None
 }
 
 fn hide_main_window(app: &tauri::App) {
@@ -3418,4 +3520,32 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
+}
+
+#[cfg(test)]
+mod agent_port_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> impl Iterator<Item = String> {
+        values
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn parses_agent_port_flags() {
+        assert_eq!(agent_api_port_from_args(args(&["--headless", "--agent-api-port", "17555"])), Some(17555));
+        assert_eq!(agent_api_port_from_args(args(&["--agent-api-port=17556"])), Some(17556));
+        assert_eq!(agent_api_port_from_args(args(&["--agent-port", "17557"])), Some(17557));
+        assert_eq!(agent_api_port_from_args(args(&["--headless"])), None);
+    }
+
+    #[test]
+    fn explicit_port_beats_registry() {
+        // Whatever the registry holds, an explicit port is used as-is.
+        assert_eq!(validate_agent_api_port(Some(17555)), Ok(17555));
+        assert!(validate_agent_api_port(Some(0)).is_err());
+    }
 }

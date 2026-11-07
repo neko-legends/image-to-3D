@@ -52,7 +52,7 @@ Use the app like a normal desktop tool.
    Or run the installer:
 
    ```text
-   release\installer\Image To 3D_26.11.7_x64-setup.exe
+   release\installer\Image To 3D_26.11.9_x64-setup.exe
    ```
 
 2. On first launch, the app checks what is already installed. If setup is
@@ -299,7 +299,7 @@ npm run release:build
 Release outputs:
 
 - `release\portable\image-to-3d.exe`
-- `release\installer\Image To 3D_26.11.7_x64-setup.exe`
+- `release\installer\Image To 3D_26.11.9_x64-setup.exe`
 
 ### Headless Runner
 
