@@ -2161,7 +2161,8 @@ def build_texture_extensions_from_source(python_path: Path, paths: dict[str, Pat
             f"Building texture rasterizer for {env['TORCH_CUDA_ARCH_LIST'].replace(';', ', ')}",
             env=env,
         )
-        if not python_can_import(python_path, "custom_rasterizer_kernel"):
+        # The kernel links against libtorch, so torch has to be imported first.
+        if not python_can_import(python_path, "torch, custom_rasterizer_kernel, mesh_inpaint_processor"):
             raise RuntimeError("The texture rasterizer built but could not be imported.")
     except Exception as error:
         message = str(error).strip()
