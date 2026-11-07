@@ -192,6 +192,10 @@ have to be repeated.
 If you want an AI agent to control the app while the GUI is open, enable the
 `Agent API` checkbox in the Pipeline panel. Most people can leave it off.
 
+### Linux / Omarchy
+
+Each GitHub release includes a Linux AppImage (`Image.To.3D_<version>_amd64.AppImage`) next to the Windows builds. Make it executable (`chmod +x`) and run it, or let [Neko Legends Control Center](https://github.com/neko-legends/neko-legends-control-center) install, update and launch it for you. Tested on Omarchy (Arch Linux + Hyprland, Wayland, NVIDIA). The Python runtime is set up with [`uv`](https://docs.astral.sh/uv/), which Omarchy already includes; models and environments go in `~/NekoLegendsAI` by default, and you can choose another location in the app.
+
 ## For AI Agents
 
 This repo is a Tauri 2 + React desktop app with a Python worker. Do not create
