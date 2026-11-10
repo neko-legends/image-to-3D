@@ -645,6 +645,40 @@ def app_paths(app_data_dir: Path, pytorch_profile: Any = None) -> dict[str, Path
     }
 
 
+def user_huggingface_token_path(env: dict[str, str] | os._Environ[str]) -> Path | None:
+    """The token file written by `hf auth login` / `huggingface-cli login` in the user's own cache, if any."""
+    candidates = []
+    if env.get("XDG_CACHE_HOME"):
+        candidates.append(Path(env["XDG_CACHE_HOME"]) / "huggingface" / "token")
+    candidates += [Path.home() / ".cache" / "huggingface" / "token", Path.home() / ".huggingface" / "token"]
+    for candidate in candidates:
+        try:
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def gated_model_help(repo: str) -> str:
+    signed_in = bool(
+        os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or os.environ.get("HF_TOKEN_PATH")
+        or (Path(os.environ.get("HF_HOME", "")) / "token").is_file()
+    )
+    steps = (
+        f"1. Open https://huggingface.co/{repo} while signed in and accept the access terms.\n"
+        "2. Sign in on this computer: run `hf auth login` (or `huggingface-cli login`) in a terminal and paste "
+        "a read token from https://huggingface.co/settings/tokens. Setting HF_TOKEN works too.\n"
+        "3. Run Prepare again."
+    )
+    reason = (
+        "The Hugging Face account signed in on this computer has not been granted access yet."
+        if signed_in
+        else "No Hugging Face sign-in was found on this computer."
+    )
+    return f"TRELLIS.2 needs the gated Hugging Face model {repo}. {reason}\n\n{steps}"
+
+
 def configure_portable_cache_env(paths: dict[str, Path], env: dict[str, str] | None = None) -> dict[str, str]:
     target = env if env is not None else os.environ
     cache_dir = paths["cache_dir"]
@@ -657,6 +691,13 @@ def configure_portable_cache_env(paths: dict[str, Path], env: dict[str, str] | N
     triton_cache = cache_dir / "triton"
     for folder in (cache_dir, tmp_dir, pip_cache, hf_home, hy3dgen_cache, matplotlib_cache, flex_gemm_cache, triton_cache):
         folder.mkdir(parents=True, exist_ok=True)
+    # HF_HOME moves to the app's model folder below, which would hide a login made with the Hugging Face
+    # CLI (`hf auth login`, saved under the user's own cache). Keep pointing at that token so gated models
+    # (TRELLIS.2 needs DINOv3) download with the user's access.
+    if not (target.get("HF_TOKEN") or target.get("HUGGING_FACE_HUB_TOKEN") or target.get("HF_TOKEN_PATH")):
+        user_token = user_huggingface_token_path(target)
+        if user_token is not None and not (hf_home / "token").is_file():
+            target["HF_TOKEN_PATH"] = str(user_token)
     target["PIP_CACHE_DIR"] = str(pip_cache)
     target["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     target["XDG_CACHE_HOME"] = str(cache_dir)
@@ -2060,6 +2101,24 @@ def ensure_redist_cuda_home(python_path: Path, info: dict[str, Any], wanted: tup
     return home
 
 
+def link_nvidia_pip_libraries(home: Path, info: dict[str, Any]) -> None:
+    """Make the CUDA libraries from PyTorch's NVIDIA pip packages linkable from the app-managed toolkit.
+
+    The redistributable toolkit only carries the compiler and runtime. Extensions that link other CUDA
+    libraries (nvdiffrec needs -lnvrtc) find them here: each `libfoo.so.N` gets a `libfoo.so` name too.
+    """
+    nvidia_root = Path(info["platlib"]) / "nvidia"
+    lib_dir = home / "lib"
+    if not nvidia_root.is_dir() or not lib_dir.is_dir():
+        return
+    for library in sorted(nvidia_root.glob("*/lib/lib*.so*")):
+        names = {library.name, library.name.split(".so")[0] + ".so"}
+        for name in names:
+            target = lib_dir / name
+            if not target.exists() and not target.is_symlink():
+                target.symlink_to(library)
+
+
 def compiler_major(command: str) -> int | None:
     try:
         output = subprocess.check_output([command, "-dumpversion"], text=True, stderr=subprocess.STDOUT)
@@ -2112,6 +2171,7 @@ def texture_build_env(python_path: Path, info: dict[str, Any]) -> dict[str, str]
     home = find_system_cuda_home(cuda)
     if home is None:
         home = ensure_redist_cuda_home(python_path, info, cuda)
+        link_nvidia_pip_libraries(home, info)
         emit("setup", f"Using app-managed CUDA compiler: {home}")
     else:
         emit("setup", f"Using CUDA toolkit: {home}")
@@ -2418,6 +2478,24 @@ def venv_subprocess_env(python_path: Path) -> dict[str, str]:
     return env
 
 
+NATIVE_BUILD_ENV_CACHE: dict[str, dict[str, str]] = {}
+
+
+def native_build_env(python_path: Path) -> dict[str, str]:
+    """Environment for pip builds of CUDA extensions (TRELLIS.2's nvdiffrast, CuMesh, FlexGEMM, O-Voxel).
+
+    Windows uses the MSVC environment. Elsewhere the build needs CUDA_HOME, nvcc on PATH and host-compiler
+    flags: desktop sessions (Omarchy/Arch) do not export them, so reuse the texture build's CUDA toolkit
+    lookup (a system toolkit matching PyTorch's CUDA, else the app-managed NVIDIA redistributable).
+    """
+    if platform.system() == "Windows":
+        return venv_subprocess_env(python_path)
+    key = str(python_path)
+    if key not in NATIVE_BUILD_ENV_CACHE:
+        NATIVE_BUILD_ENV_CACHE[key] = texture_build_env(python_path, venv_build_info(python_path))
+    return dict(NATIVE_BUILD_ENV_CACHE[key])
+
+
 def patch_flex_gemm_source(source_dir: Path) -> None:
     sparse_neighbor_map = source_dir / "flex_gemm" / "kernels" / "cuda" / "spconv" / "sparse_neighbor_map.cu"
     changed = False
@@ -2501,7 +2579,7 @@ def ensure_trellis_extension(python_path: Path, paths: dict[str, Path], name: st
     run_checked(
         [str(python_path), "-m", "pip", "install", str(destination), "--no-build-isolation"],
         f"Installing TRELLIS.2 extension {name}",
-        env=venv_subprocess_env(python_path),
+        env=native_build_env(python_path),
     )
 
 
@@ -2522,7 +2600,7 @@ def ensure_trellis_env(python_path: Path, paths: dict[str, Path]) -> None:
     run_checked(
         [str(python_path), "-m", "pip", "install", str(o_voxel_dir), "--no-build-isolation", "--no-deps"],
         "Installing TRELLIS.2 O-Voxel extension",
-        env=venv_subprocess_env(python_path),
+        env=native_build_env(python_path),
     )
     marker.write_text("ok\n", encoding="utf-8")
 
@@ -2652,12 +2730,7 @@ def ensure_trellis_models(paths: dict[str, Path]) -> None:
     except Exception as error:
         message = str(error)
         if "gated repo" in message.lower() or "403" in message:
-            raise RuntimeError(
-                "TRELLIS.2 requires access to the gated Hugging Face model "
-                f"{TRELLIS_DINOV3_REPO}. The current Hugging Face token is not authorized. "
-                f"Request access at https://huggingface.co/{TRELLIS_DINOV3_REPO}, then run Prepare again "
-                "with an authorized HF_TOKEN or HUGGING_FACE_HUB_TOKEN."
-            ) from error
+            raise RuntimeError(gated_model_help(TRELLIS_DINOV3_REPO)) from error
         raise
     emit("model", "Checking TRELLIS.2 background removal model")
     try:
@@ -2669,12 +2742,7 @@ def ensure_trellis_models(paths: dict[str, Path]) -> None:
     except Exception as error:
         message = str(error)
         if "gated repo" in message.lower() or "403" in message:
-            raise RuntimeError(
-                "TRELLIS.2 requires access to the gated Hugging Face model "
-                f"{TRELLIS_REMBG_REPO}. The current Hugging Face token is not authorized. "
-                f"Request access at https://huggingface.co/{TRELLIS_REMBG_REPO}, then run Prepare again "
-                "with an authorized HF_TOKEN or HUGGING_FACE_HUB_TOKEN."
-            ) from error
+            raise RuntimeError(gated_model_help(TRELLIS_REMBG_REPO)) from error
         raise
     marker.write_text("ok\n", encoding="utf-8")
 

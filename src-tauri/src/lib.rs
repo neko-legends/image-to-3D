@@ -2515,12 +2515,23 @@ fn start_worker_job_core(
     let active_jobs_for_stdout = active_jobs.clone();
     let active_jobs_for_wait = active_jobs.clone();
     let job_id_for_wait = job_id.clone();
+    // The worker reports why it failed as an "error" event (or on stderr) just before it exits.
+    // Keep that, so the generic "exited with an error" message never replaces the real reason.
+    let reported_error = Arc::new(Mutex::new(None::<serde_json::Value>));
+    let reported_error_for_stdout = reported_error.clone();
+    let stderr_tail = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
+    let stderr_tail_for_stderr = stderr_tail.clone();
 
-    thread::spawn(move || {
+    let stdout_reader = thread::spawn(move || {
         if let Some(stdout) = stdout {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if value.get("type").and_then(serde_json::Value::as_str) == Some("error") {
+                        if let Ok(mut slot) = reported_error_for_stdout.lock() {
+                            *slot = Some(value.clone());
+                        }
+                    }
                     let _ = active_jobs_for_stdout.record_event(&value);
                     let _ = app_for_stdout.emit("hunyuan-worker-event", value);
                 } else {
@@ -2532,10 +2543,16 @@ fn start_worker_job_core(
         }
     });
 
-    thread::spawn(move || {
+    let stderr_reader = thread::spawn(move || {
         if let Some(stderr) = stderr {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
+                if let Ok(mut tail) = stderr_tail_for_stderr.lock() {
+                    if tail.len() >= 12 {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line.clone());
+                }
                 let _ = app_for_stderr.emit(
                     "hunyuan-worker-event",
                     serde_json::json!({ "type": "setup", "message": line }),
@@ -2546,6 +2563,13 @@ fn start_worker_job_core(
 
     thread::spawn(move || {
         let status = child.wait();
+        // Let the readers drain the last lines (bounded: a stray child may keep the pipe open).
+        for _ in 0..20 {
+            if stdout_reader.is_finished() && stderr_reader.is_finished() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
         let was_canceled = active_jobs_for_wait
             .finish(&job_id_for_wait)
             .unwrap_or(false);
@@ -2557,9 +2581,18 @@ fn start_worker_job_core(
             let _ = active_jobs_for_wait.record_last_event(&value);
             let _ = app_for_wait.emit("hunyuan-worker-event", value);
         } else if !matches!(status, Ok(status) if status.success()) {
-            let value = serde_json::json!({
-                "type": "error",
-                "message": "Image To 3D worker exited with an error."
+            let reported = reported_error.lock().ok().and_then(|slot| slot.clone());
+            let value = reported.unwrap_or_else(|| {
+                let tail = stderr_tail
+                    .lock()
+                    .map(|tail| tail.iter().cloned().collect::<Vec<_>>().join("\n"))
+                    .unwrap_or_default();
+                let message = if tail.trim().is_empty() {
+                    "Image To 3D worker exited with an error.".to_string()
+                } else {
+                    format!("Image To 3D worker exited with an error.\n\nLast output:\n{tail}")
+                };
+                serde_json::json!({ "type": "error", "message": message })
             });
             let _ = active_jobs_for_wait.record_last_event(&value);
             let _ = app_for_wait.emit("hunyuan-worker-event", value);
