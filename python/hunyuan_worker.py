@@ -55,6 +55,12 @@ TRELLIS_SOURCE_URL = "https://github.com/microsoft/TRELLIS.2.git"
 TRELLIS_MODEL_REPO = "microsoft/TRELLIS.2-4B"
 TRELLIS_DINOV3_REPO = "facebook/dinov3-vitl16-pretrain-lvd1689m"
 TRELLIS_REMBG_REPO = "briaai/RMBG-2.0"
+# RMBG-2.0 is gated on Hugging Face. Without access, use BiRefNet (MIT), the open model it is built on
+# and TRELLIS.2's own default, pinned to a revision: (repo, revision).
+# DINOv3 is gated too and has no substitute: the user needs access from Meta (see gated_model_help).
+TRELLIS_OPEN_FALLBACKS = {
+    TRELLIS_REMBG_REPO: ("ZhengPeng7/BiRefNet", "e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4"),
+}
 ENV_MARKER = ".ih3d-env-v4-ready"
 HUNYUAN_SOURCE_MARKER = ".ih3d-source-v1-ready"
 HUNYUAN_MODEL_MARKER = ".ih3d-models-v1-ready"
@@ -2704,6 +2710,83 @@ def ensure_hunyuan_models(paths: dict[str, Path], include_texture: bool = True) 
     marker.write_text("ok\n", encoding="utf-8")
 
 
+def is_gated_access_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return (
+        type(error).__name__ in ("GatedRepoError", "RepositoryNotFoundError")
+        or "gated repo" in message
+        or "401" in message
+        or "403" in message
+    )
+
+
+def resolve_trellis_support_model(repo: str, label: str, download: bool) -> str:
+    """Local folder of a model TRELLIS.2 needs besides its own bundle.
+
+    Prefers the official (gated) repo when it is already downloaded or the user has access, and
+    otherwise the open equivalent from TRELLIS_OPEN_FALLBACKS, if there is one.
+    """
+    from huggingface_hub import snapshot_download
+
+    fallback = TRELLIS_OPEN_FALLBACKS.get(repo)
+    candidates = [(repo, None)] + ([fallback] if fallback else [])
+    for candidate, revision in candidates:
+        try:
+            return snapshot_download(repo_id=candidate, revision=revision, local_files_only=True)
+        except Exception:
+            continue
+    if not download:
+        raise RuntimeError(f"The TRELLIS.2 {label} is not downloaded yet. Run Prepare first.")
+    try:
+        return snapshot_download(
+            repo_id=repo,
+            local_files_only=False,
+            tqdm_class=hf_snapshot_progress_class(f"{label} files"),
+        )
+    except Exception as error:
+        if not is_gated_access_error(error):
+            raise
+        if not fallback:
+            raise RuntimeError(gated_model_help(repo)) from error
+    emit("model", f"No Hugging Face access to {repo}; downloading the open equivalent {fallback[0]}")
+    return snapshot_download(
+        repo_id=fallback[0],
+        revision=fallback[1],
+        local_files_only=False,
+        tqdm_class=hf_snapshot_progress_class(f"{label} files"),
+    )
+
+
+def use_local_trellis_support_models() -> None:
+    """Make the TRELLIS.2 pipeline load DINOv3 and background removal from the folders resolved above.
+
+    Its pipeline.json names the gated repos; the loader looks the classes up by name on these modules.
+    """
+    from trellis2.modules import image_feature_extractor
+    from trellis2.pipelines import rembg
+
+    def redirect(module: Any, class_name: str, label: str) -> None:
+        original = getattr(module, class_name)
+        if getattr(original, "_i3d_redirected", False):
+            return
+
+        def build(*args: Any, **kwargs: Any) -> Any:
+            name = kwargs.get("model_name") or (args[0] if args else None)
+            if name in (TRELLIS_DINOV3_REPO, TRELLIS_REMBG_REPO):
+                local = resolve_trellis_support_model(name, label, download=True)
+                if args:
+                    args = (local, *args[1:])
+                else:
+                    kwargs["model_name"] = local
+            return original(*args, **kwargs)
+
+        build._i3d_redirected = True  # type: ignore[attr-defined]
+        setattr(module, class_name, build)
+
+    redirect(image_feature_extractor, "DinoV3FeatureExtractor", "DINOv3 image conditioning model")
+    redirect(rembg, "BiRefNet", "background removal model")
+
+
 def ensure_trellis_models(paths: dict[str, Path]) -> None:
     paths["model_dir"].mkdir(parents=True, exist_ok=True)
     marker = paths["model_dir"] / TRELLIS_MODEL_MARKER
@@ -2720,30 +2803,12 @@ def ensure_trellis_models(paths: dict[str, Path]) -> None:
         local_files_only=False,
         tqdm_class=hf_snapshot_progress_class("TRELLIS.2 model files"),
     )
-    emit("model", "Checking TRELLIS.2 DINOv3 image conditioning model")
-    try:
-        snapshot_download(
-            repo_id=TRELLIS_DINOV3_REPO,
-            local_files_only=False,
-            tqdm_class=hf_snapshot_progress_class("DINOv3 model files"),
-        )
-    except Exception as error:
-        message = str(error)
-        if "gated repo" in message.lower() or "403" in message:
-            raise RuntimeError(gated_model_help(TRELLIS_DINOV3_REPO)) from error
-        raise
-    emit("model", "Checking TRELLIS.2 background removal model")
-    try:
-        snapshot_download(
-            repo_id=TRELLIS_REMBG_REPO,
-            local_files_only=False,
-            tqdm_class=hf_snapshot_progress_class("RMBG model files"),
-        )
-    except Exception as error:
-        message = str(error)
-        if "gated repo" in message.lower() or "403" in message:
-            raise RuntimeError(gated_model_help(TRELLIS_REMBG_REPO)) from error
-        raise
+    for repo, label in (
+        (TRELLIS_DINOV3_REPO, "DINOv3 image conditioning model"),
+        (TRELLIS_REMBG_REPO, "background removal model"),
+    ):
+        emit("model", f"Checking TRELLIS.2 {label}")
+        resolve_trellis_support_model(repo, label, download=True)
     marker.write_text("ok\n", encoding="utf-8")
 
 
@@ -4228,6 +4293,7 @@ def run_trellis_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
         if pipeline is None:
             model_started = time.perf_counter()
             emit("model", "Loading TRELLIS.2 model on CUDA")
+            use_local_trellis_support_models()
             pipeline = Trellis2ImageTo3DPipeline.from_pretrained(TRELLIS_MODEL_REPO)
             if as_bool(options.get("forceOffload"), False):
                 pipeline.low_vram = True
