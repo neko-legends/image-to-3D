@@ -261,6 +261,11 @@ Runtime profiles:
   cards and falls back to compatible GPUs when a newer card is not supported.
 - `cu128` installs `torch==2.7.1+cu128`, `torchvision==0.22.1+cu128`,
   `torchaudio==2.7.1+cu128`. This is intended for RTX 50 / Blackwell GPUs.
+- `cu134` installs `torch==2.15.0+cu134`, `torchvision==0.29.2+cu134`,
+  `torchaudio==2.11.1+cu134`: the newest PyTorch, on CUDA 13.4, for RTX 50 /
+  Blackwell GPUs. It needs an NVIDIA driver with CUDA 13.4 support. Its native
+  extensions build as C++20 (PyTorch 2.10+ requires it). On Linux the build uses a
+  system CUDA 13.4 toolkit (`/opt/cuda` on Arch/Omarchy) with GCC up to 16.
 
 Choosing a different CUDA GPU does not delete files or reinstall packages; the
 worker only points CUDA at the selected card. Changing the PyTorch runtime
@@ -330,6 +335,7 @@ Useful flags:
 - `--fast-preview` uses faster mesh-only settings.
 - `--cuda-device 1` selects a specific NVIDIA GPU index.
 - `--runtime-profile cu128` installs/uses the CUDA 12.8 RTX 50-series profile.
+- `--runtime-profile cu134` installs/uses the CUDA 13.4 profile (newest PyTorch).
 - `--mode meshTexture` creates mesh and texture.
 - `--mode meshOnly` creates a faster mesh preview.
 - `--mode textureOnly --mesh-input-path D:\mesh\source.glb` textures an existing

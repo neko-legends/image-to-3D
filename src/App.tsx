@@ -490,7 +490,7 @@ function coerceModelBackend(value: unknown, fallback: ModelBackend): ModelBacken
 }
 
 function coerceRuntimeProfile(value: unknown, fallback: string) {
-  return value === "cu124" || value === "cu128" ? value : fallback;
+  return value === "cu124" || value === "cu128" || value === "cu134" ? value : fallback;
 }
 
 function coerceSeedMode(value: unknown, fallback: SeedMode): SeedMode {
@@ -715,6 +715,7 @@ function gpuOptionLabel(gpu: GpuVram) {
 }
 
 function runtimeProfileLabel(profile: string) {
+  if (profile === "cu134") return "CUDA 13.4 / RTX 50 newest";
   if (profile === "cu128") return "CUDA 12.8 / RTX 50";
   if (profile === "cu124") return "CUDA 12.4 / stable";
   return profile || "not installed";
@@ -916,7 +917,7 @@ function App() {
     () => selectedCudaGpu(vram, options.cudaDevice),
     [options.cudaDevice, vram]
   );
-  const shouldRecommendCu128 = Boolean(rtx50RecommendationGpu && options.runtimeProfile !== "cu128");
+  const shouldRecommendCu128 = Boolean(rtx50RecommendationGpu && options.runtimeProfile !== "cu128" && options.runtimeProfile !== "cu134");
   const selectedBackendLabel = backendLabels[options.modelBackend];
   const isHunyuanBackend = options.modelBackend === "hunyuan";
   const isTrellisBackend = options.modelBackend === "trellis2";
@@ -2985,6 +2986,7 @@ function App() {
                   >
                     <option value="cu124">CUDA 12.4 / stable 30-40 series</option>
                     <option value="cu128">CUDA 12.8 / RTX 50 Blackwell</option>
+                    <option value="cu134">CUDA 13.4 / RTX 50 Blackwell, newest PyTorch</option>
                   </select>
                 </label>
               </div>
@@ -3138,6 +3140,7 @@ function App() {
                   >
                     <option value="cu124">CUDA 12.4 / stable 30-40 series</option>
                     <option value="cu128">CUDA 12.8 / RTX 50 Blackwell</option>
+                    <option value="cu134">CUDA 13.4 / RTX 50 Blackwell, newest PyTorch</option>
                   </select>
                 </label>
               </div>

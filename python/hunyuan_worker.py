@@ -261,6 +261,15 @@ PYTORCH_RUNTIME_PROFILES = {
             "torchaudio==2.7.1+cu128",
         ],
     },
+    "cu134": {
+        "label": "PyTorch CUDA 13.4",
+        "index_url": "https://download.pytorch.org/whl/cu134",
+        "packages": [
+            "torch==2.15.0+cu134",
+            "torchvision==0.29.2+cu134",
+            "torchaudio==2.11.1+cu134",
+        ],
+    },
 }
 COMPAT_PACKAGES = [
     "numpy==1.26.4",
@@ -2134,8 +2143,23 @@ def compiler_major(command: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def nvcc_host_flags(nvcc: tuple[int, int]) -> list[str]:
-    max_gcc = NVCC_MAX_GCC.get(nvcc, 14)
+def toolkit_max_gcc(cuda_home: Path | None) -> int | None:
+    """Newest GCC the toolkit accepts, read from its own host_config.h guard (`#if __GNUC__ > N`)."""
+    if cuda_home is None:
+        return None
+    for header in (cuda_home / "include" / "crt" / "host_config.h",
+                   cuda_home / "targets" / "x86_64-linux" / "include" / "crt" / "host_config.h"):
+        try:
+            match = re.search(r"#if\s+__GNUC__\s*>\s*(\d+)", header.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def nvcc_host_flags(nvcc: tuple[int, int], cuda_home: Path | None = None) -> list[str]:
+    max_gcc = toolkit_max_gcc(cuda_home) or NVCC_MAX_GCC.get(nvcc, 14)
     gcc = compiler_major("g++")
     if gcc is not None and gcc <= max_gcc:
         return []
@@ -2186,7 +2210,7 @@ def texture_build_env(python_path: Path, info: dict[str, Any]) -> dict[str, str]
     env["PATH"] = str(home / "bin") + os.pathsep + env.get("PATH", "")
     env["TORCH_CUDA_ARCH_LIST"] = cuda_arch_list()
     env.setdefault("MAX_JOBS", str(max(1, min(16, os.cpu_count() or 1))))
-    flags = nvcc_host_flags(nvcc_version(home / "bin" / "nvcc") or cuda)
+    flags = nvcc_host_flags(nvcc_version(home / "bin" / "nvcc") or cuda, home)
     if flags:
         env["NVCC_APPEND_FLAGS"] = " ".join([env.get("NVCC_APPEND_FLAGS", ""), *flags]).strip()
     return env
@@ -2577,11 +2601,36 @@ def patch_o_voxel_source(source_dir: Path) -> None:
         emit("setup", "Patched O-Voxel C++ source for the Windows TRELLIS.2 build")
 
 
+def torch_requires_cpp20(python_path: Path) -> bool:
+    """PyTorch 2.10+ headers refuse to compile below C++20 (CUDA 13 wheels are all that new)."""
+    env_dir = python_path.parent.parent
+    for aten_h in [*env_dir.glob("lib/python3*/site-packages/torch/include/ATen/ATen.h"),
+                   env_dir / "Lib" / "site-packages" / "torch" / "include" / "ATen" / "ATen.h"]:
+        try:
+            if "C++20 or later" in aten_h.read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def patch_cpp_standard_for_torch(python_path: Path, setup_py: Path, name: str) -> None:
+    """CuMesh and O-Voxel pin C++17 in setup.py; lift that to C++20 when the installed PyTorch needs it."""
+    if not setup_py.is_file() or not torch_requires_cpp20(python_path):
+        return
+    text = setup_py.read_text(encoding="utf-8")
+    patched = text.replace("std=c++17", "std=c++20").replace("std:c++17", "std:c++20")
+    if patched != text:
+        setup_py.write_text(patched, encoding="utf-8", newline="\n")
+        emit("setup", f"Building {name} as C++20 for the installed PyTorch")
+
+
 def ensure_trellis_extension(python_path: Path, paths: dict[str, Path], name: str, repo_url: str, branch_or_tag: str | None) -> None:
     destination = paths["trellis_extensions_dir"] / name
     clone_or_update(repo_url, destination, name, branch_or_tag=branch_or_tag, recursive=True)
     if name == "FlexGEMM":
         patch_flex_gemm_source(destination)
+    patch_cpp_standard_for_torch(python_path, destination / "setup.py", name)
     run_checked(
         [str(python_path), "-m", "pip", "install", str(destination), "--no-build-isolation"],
         f"Installing TRELLIS.2 extension {name}",
@@ -2603,6 +2652,7 @@ def ensure_trellis_env(python_path: Path, paths: dict[str, Path]) -> None:
     if not o_voxel_dir.is_dir():
         raise RuntimeError("TRELLIS.2 o-voxel submodule is missing. Run setup again with Git available.")
     patch_o_voxel_source(o_voxel_dir)
+    patch_cpp_standard_for_torch(python_path, o_voxel_dir / "setup.py", "O-Voxel")
     run_checked(
         [str(python_path), "-m", "pip", "install", str(o_voxel_dir), "--no-build-isolation", "--no-deps"],
         "Installing TRELLIS.2 O-Voxel extension",
@@ -2720,6 +2770,11 @@ def is_gated_access_error(error: Exception) -> bool:
     )
 
 
+def snapshot_has_weights(folder: str | Path) -> bool:
+    root = Path(folder)
+    return any(any(root.rglob(pattern)) for pattern in ("*.safetensors", "*.bin", "*.pth", "*.pt"))
+
+
 def resolve_trellis_support_model(repo: str, label: str, download: bool) -> str:
     """Local folder of a model TRELLIS.2 needs besides its own bundle.
 
@@ -2732,17 +2787,23 @@ def resolve_trellis_support_model(repo: str, label: str, download: bool) -> str:
     candidates = [(repo, None)] + ([fallback] if fallback else [])
     for candidate, revision in candidates:
         try:
-            return snapshot_download(repo_id=candidate, revision=revision, local_files_only=True)
+            local = snapshot_download(repo_id=candidate, revision=revision, local_files_only=True)
         except Exception:
             continue
+        # A gated repo's README and LICENSE download without access, leaving a snapshot with no weights.
+        if snapshot_has_weights(local):
+            return local
     if not download:
         raise RuntimeError(f"The TRELLIS.2 {label} is not downloaded yet. Run Prepare first.")
     try:
-        return snapshot_download(
+        local = snapshot_download(
             repo_id=repo,
             local_files_only=False,
             tqdm_class=hf_snapshot_progress_class(f"{label} files"),
         )
+        if not snapshot_has_weights(local):
+            raise RuntimeError(gated_model_help(repo) if not fallback else f"{repo} downloaded without weights.")
+        return local
     except Exception as error:
         if not is_gated_access_error(error):
             raise

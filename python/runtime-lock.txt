@@ -15,6 +15,9 @@
 # - Optional RTX 50 / Blackwell profile: cu128
 #   torch==2.7.1+cu128, torchvision==0.22.1+cu128,
 #   torchaudio==2.7.1+cu128
+# - Optional newest-PyTorch Blackwell profile: cu134
+#   torch==2.15.0+cu134, torchvision==0.29.2+cu134,
+#   torchaudio==2.11.1+cu134 (extensions build as C++20)
 # - Hunyuan source: https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1
 # - Texture Windows wheels: https://github.com/visualbruno/ComfyUI-Hunyuan3d-2-1
 # - Model weights: tencent/Hunyuan3D-2.1

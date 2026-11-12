@@ -768,6 +768,7 @@ fn env_python_path(env_dir: &Path) -> PathBuf {
 
 fn normalize_runtime_profile(profile: &str) -> String {
     match profile.trim() {
+        "cu134" => "cu134".to_string(),
         "cu128" => "cu128".to_string(),
         "cu124" => "cu124".to_string(),
         _ => DEFAULT_PYTORCH_PROFILE.to_string(),

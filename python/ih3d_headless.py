@@ -187,9 +187,9 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--cuda-device", default=None, help="CUDA GPU index to use, or auto.")
     parser.add_argument(
         "--runtime-profile",
-        choices=["cu124", "cu128"],
+        choices=["cu124", "cu128", "cu134"],
         default=None,
-        help="PyTorch CUDA runtime profile. cu128 is intended for RTX 50 / Blackwell GPUs.",
+        help="PyTorch CUDA runtime profile. cu128 and cu134 (CUDA 13.4, newest PyTorch) are for RTX 50 / Blackwell GPUs.",
     )
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--output-name", default="")
