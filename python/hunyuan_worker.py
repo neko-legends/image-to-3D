@@ -1151,6 +1151,28 @@ def patch_trellis_dinov3_source(source_dir: Path) -> None:
         emit("setup", "Patched TRELLIS.2 DINOv3 feature extractor for current Transformers")
 
 
+def patch_trellis_rembg_source(source_dir: Path) -> None:
+    """Feed BiRefNet its own dtype: Transformers 5 loads BiRefNet's fp16 weights as fp16, while
+    TRELLIS.2 passes it a float32 image ("Input type (float) and bias type (c10::Half)")."""
+    file_path = source_dir / "trellis2" / "pipelines" / "rembg" / "BiRefNet.py"
+    if not file_path.is_file():
+        return
+    text = file_path.read_text(encoding="utf-8")
+    old_input = 'input_images = self.transform_image(image).unsqueeze(0).to("cuda")\n'
+    new_input = (
+        'input_images = self.transform_image(image).unsqueeze(0).to("cuda")\n'
+        '        input_images = input_images.to(dtype=next(self.model.parameters()).dtype)\n'
+    )
+    old_pred = "preds = self.model(input_images)[-1].sigmoid().cpu()\n"
+    new_pred = "preds = self.model(input_images)[-1].sigmoid().float().cpu()\n"
+    if "next(self.model.parameters()).dtype" in text:
+        return
+    patched = text.replace(old_input, new_input).replace(old_pred, new_pred)
+    if patched != text:
+        file_path.write_text(patched, encoding="utf-8", newline="\n")
+        emit("setup", "Patched TRELLIS.2 background removal to match the model's dtype")
+
+
 def patch_trellis_attention_source(source_dir: Path) -> None:
     changed = False
 
@@ -1318,12 +1340,14 @@ def ensure_trellis_source(paths: dict[str, Path]) -> Path:
     if marker.exists() and (source_dir / "trellis2").is_dir():
         patch_trellis_dinov3_source(source_dir)
         patch_trellis_attention_source(source_dir)
+        patch_trellis_rembg_source(source_dir)
         return source_dir
     clone_or_update(TRELLIS_SOURCE_URL, source_dir, TRELLIS_REPO, recursive=True)
     if not (source_dir / "trellis2").is_dir():
         raise RuntimeError("TRELLIS.2 source did not contain the trellis2 Python package.")
     patch_trellis_dinov3_source(source_dir)
     patch_trellis_attention_source(source_dir)
+    patch_trellis_rembg_source(source_dir)
     marker.write_text("ok\n", encoding="utf-8")
     return source_dir
 
@@ -2775,7 +2799,45 @@ def snapshot_has_weights(folder: str | Path) -> bool:
     return any(any(root.rglob(pattern)) for pattern in ("*.safetensors", "*.bin", "*.pth", "*.pt"))
 
 
+def materialize_remote_code_snapshot(snapshot: str) -> str:
+    """Folder copy of a Hugging Face snapshot in which the model's own Python files are real files.
+
+    Hub snapshots are symlinks into hash-named blobs. For a local folder, Transformers resolves a
+    trust_remote_code module through that symlink and then looks for its relative imports (e.g.
+    BiRefNet's BiRefNet_config.py) beside the blob, where they do not exist. Python files are copied;
+    everything else is hard-linked (copied if linking fails), so the weights take no extra space.
+    """
+    source = Path(snapshot)
+    if not any(source.glob("*.py")):
+        return snapshot
+    # <HF_HOME>/hub/models--<org>--<name>/snapshots/<revision>
+    target = source.parents[3] / "i3d-remote-code" / source.parents[1].name / source.name
+    for item in source.rglob("*"):
+        if item.is_dir():
+            continue
+        relative = item.relative_to(source)
+        destination = target / relative
+        real = item.resolve()
+        if destination.is_file() and destination.stat().st_size == real.stat().st_size:
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() or destination.is_symlink():
+            destination.unlink()
+        if item.suffix == ".py":
+            shutil.copyfile(real, destination)
+            continue
+        try:
+            os.link(real, destination)
+        except OSError:
+            shutil.copyfile(real, destination)
+    return str(target)
+
+
 def resolve_trellis_support_model(repo: str, label: str, download: bool) -> str:
+    return materialize_remote_code_snapshot(resolve_trellis_support_snapshot(repo, label, download))
+
+
+def resolve_trellis_support_snapshot(repo: str, label: str, download: bool) -> str:
     """Local folder of a model TRELLIS.2 needs besides its own bundle.
 
     Prefers the official (gated) repo when it is already downloaded or the user has access, and
@@ -4311,6 +4373,7 @@ def run_trellis_generation(job: dict[str, Any], paths: dict[str, Path]) -> None:
     launch_cwd = Path.cwd()
     patch_trellis_dinov3_source(source_dir)
     patch_trellis_attention_source(source_dir)
+    patch_trellis_rembg_source(source_dir)
     sys.path.insert(0, str(source_dir))
     os.chdir(source_dir)
     os.environ.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
